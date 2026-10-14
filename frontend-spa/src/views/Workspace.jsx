@@ -289,7 +289,7 @@ const moduleEndpoints = {
   users: '/users',
 };
 
-const moduleIcons = {
+const legacyModuleIcons = {
   dashboard: (
     <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="3" width="7" height="9" rx="1" />
@@ -462,6 +462,34 @@ const moduleIcons = {
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
     </svg>
   ),
+};
+
+// Each sidebar destination intentionally has its own Solar icon. This keeps
+// the navigation scannable even for users who work across several modules.
+const moduleIcons = {
+  dashboard: <Icon name="grid" size={18} className="nav-icon" />,
+  vehicles: <Icon name="vehicle" size={18} className="nav-icon" />,
+  categories: <Icon name="list" size={18} className="nav-icon" />,
+  locations: <Icon name="pin" size={18} className="nav-icon" />,
+  conditions: <Icon name="checkCircle" size={18} className="nav-icon" />,
+  issues: <Icon name="alert" size={18} className="nav-icon" />,
+  maintenance: <Icon name="wrench" size={18} className="nav-icon" />,
+  maintenanceStatus: <Icon name="info" size={18} className="nav-icon" />,
+  maintenanceLedger: <Icon name="tools" size={18} className="nav-icon" />,
+  schedules: <Icon name="calendar" size={18} className="nav-icon" />,
+  tickets: <Icon name="ticket" size={18} className="nav-icon" />,
+  ticketArchives: <Icon name="archive" size={18} className="nav-icon" />,
+  reportOrPropose: <Icon name="flag" size={18} className="nav-icon" />,
+  myTasks: <Icon name="clipboard" size={18} className="nav-icon" />,
+  ticketPropose: <Icon name="plus" size={18} className="nav-icon" />,
+  ticketInspections: <Icon name="search" size={18} className="nav-icon" />,
+  ticketVerifications: <Icon name="eye" size={18} className="nav-icon" />,
+  ticketWorkOrders: <Icon name="link" size={18} className="nav-icon" />,
+  workTracker: <Icon name="columns" size={18} className="nav-icon" />,
+  histories: <Icon name="undo" size={18} className="nav-icon" />,
+  reports: <Icon name="download" size={18} className="nav-icon" />,
+  logs: <Icon name="bell" size={18} className="nav-icon" />,
+  users: <Icon name="key" size={18} className="nav-icon" />,
 };
 
 function Workspace() {

@@ -78,8 +78,8 @@ const TAB_ICONS = {
   users: <UsersIcon />,
   codes: <Icon name="key" size={18} className="nav-icon" />,
   concerns: <Icon name="mail" size={18} className="nav-icon" />,
-  activity: <Icon name="clipboard" size={18} className="nav-icon" />,
-  settings: <Icon name="key" size={18} className="nav-icon" />,
+  activity: <Icon name="undo" size={18} className="nav-icon" />,
+  settings: <Icon name="gear" size={18} className="nav-icon" />,
 };
 
 function ProfileMenu({ user, open, setOpen, onOpenSettings, onLogout }) {
