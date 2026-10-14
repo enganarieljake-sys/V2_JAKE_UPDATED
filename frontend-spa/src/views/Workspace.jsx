@@ -14,7 +14,7 @@ import WorkspaceFooter from '../components/WorkspaceFooter';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { DonutChart, SolidPieChart, StackedBarChart } from '../components/charts';
 import { AuthContext } from '../context/AuthContextObject';
-import { PAKNAAN_POLYGON } from '../data/paknaanLocationDensity';
+import { PAKNAAN_AUTHORITATIVE_GEOMETRY } from '../data/paknaanLocationDensity';
 import { geoJsonToRings, isPointWithinBoundaryRings } from '../utils/boundary';
 import { geocodeAddress, reverseGeocode } from '../utils/geocode';
 
@@ -2509,8 +2509,17 @@ function Workspace() {
   // hardcoded Paknaan outline when no barangay override is selected, or the
   // override has no boundary geometry on file).
   const locationBoundaryRings = useMemo(() => {
+    const paknaanRings = geoJsonToRings(PAKNAAN_AUTHORITATIVE_GEOMETRY);
+    // The API's general-purpose polygon is simplified. Paknaan uses the
+    // detailed operational outline so the drawn map and location validation
+    // match the accurate boundary supplied for this service area.
+    const isPaknaan = String(mapBoundaryOverride?.label ?? 'Paknaan')
+      .replace(/[^a-z]/gi, '')
+      .toLowerCase() === 'paknaan';
+    if (isPaknaan) return paknaanRings;
+
     const overrideRings = geoJsonToRings(mapBoundaryOverride?.geometry);
-    return overrideRings.length ? overrideRings : [PAKNAAN_POLYGON];
+    return overrideRings.length ? overrideRings : paknaanRings;
   }, [mapBoundaryOverride]);
   const locationBoundaryLabel = mapBoundaryOverride?.label ?? 'Paknaan';
   // Guards the one-time "default to Paknaan" seed below from re-firing on a
