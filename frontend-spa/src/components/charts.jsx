@@ -43,8 +43,16 @@ function barTooltip({ active, payload }) {
 }
 
 export function DonutChart({ segments, centerLabel, centerSubLabel }) {
+  const [hoveredSegment, setHoveredSegment] = useState(null);
   const data = segments.filter((s) => s.value > 0);
   const pieData = data.length ? data : [{ label: 'None', value: 1, color: EMPTY_SLICE_COLOR }];
+  const displayedSegment = hoveredSegment ?? { value: centerLabel, label: centerSubLabel };
+
+  const handleSegmentEnter = (entry) => {
+    // Recharts supplies a rendered sector whose `payload` is the original
+    // segment. Fall back to the entry so this also works across versions.
+    setHoveredSegment(entry?.payload ?? entry);
+  };
 
   return (
     <div className="donut-chart">
@@ -59,6 +67,8 @@ export function DonutChart({ segments, centerLabel, centerSubLabel }) {
             paddingAngle={data.length > 1 ? 2 : 0}
             stroke="none"
             isAnimationActive={false}
+            onMouseEnter={data.length ? handleSegmentEnter : undefined}
+            onMouseLeave={() => setHoveredSegment(null)}
           >
             {pieData.map((seg) => <Cell key={seg.label} fill={seg.color} />)}
           </Pie>
@@ -66,8 +76,8 @@ export function DonutChart({ segments, centerLabel, centerSubLabel }) {
         </PieChart>
       </ResponsiveContainer>
       <div className="donut-center">
-        <strong>{centerLabel}</strong>
-        <span>{centerSubLabel}</span>
+        <strong>{displayedSegment.value}</strong>
+        <span>{displayedSegment.label}</span>
       </div>
     </div>
   );
