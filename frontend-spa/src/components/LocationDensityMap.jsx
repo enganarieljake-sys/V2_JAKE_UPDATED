@@ -5,8 +5,8 @@ import { MapContainer, Marker, Polygon, Popup, TileLayer, Tooltip, useMap, ZoomC
 import { toPng } from 'html-to-image';
 import api from '../api/axios';
 import {
+  PAKNAAN_AUTHORITATIVE_GEOMETRY,
   PAKNAAN_CENTER,
-  PAKNAAN_POLYGON,
 } from '../data/paknaanLocationDensity';
 import { geoJsonToRings } from '../utils/boundary';
 
@@ -486,14 +486,22 @@ function LocationDensityMap({
   // barangays do today), rather than silently substituting Paknaan's shape.
   const boundaryRings = useMemo(() => {
     if (hasBoundarySelection && !hasBoundaryGeometry) return [];
+    const paknaanRings = geoJsonToRings(PAKNAAN_AUTHORITATIVE_GEOMETRY);
+    const isPaknaan = String(boundaryLabel)
+      .replace(/[^a-z]/gi, '')
+      .toLowerCase() === 'paknaan';
+    if (isPaknaan) return paknaanRings;
+
     const overrideRings = geoJsonToRings(boundaryOverride?.geometry);
-    return overrideRings.length ? overrideRings : [PAKNAAN_POLYGON];
-  }, [boundaryOverride, hasBoundarySelection, hasBoundaryGeometry]);
+    return overrideRings.length ? overrideRings : paknaanRings;
+  }, [boundaryLabel, boundaryOverride, hasBoundarySelection, hasBoundaryGeometry]);
   // The map still needs *some* valid area to frame even when there's
   // nothing to draw — keep the last known region (Paknaan) rather than an
   // empty/invalid Leaflet bounds object.
   const boundaryBounds = useMemo(() => {
-    const framingRings = boundaryRings.length ? boundaryRings : [PAKNAAN_POLYGON];
+    const framingRings = boundaryRings.length
+      ? boundaryRings
+      : geoJsonToRings(PAKNAAN_AUTHORITATIVE_GEOMETRY);
     return L.latLngBounds(framingRings.flat());
   }, [boundaryRings]);
   // Generous padding so panning/zooming still feels free within whichever

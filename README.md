@@ -24,6 +24,38 @@ It is built as a decoupled application: a **Laravel REST API** (`backend-api/`) 
 14. [Testing](#testing)
 15. [Deployment](#deployment)
 16. [Documentation](#documentation)
+17. [AI Branch & Pull Request Template](#ai-branch--pull-request-template)
+
+---
+
+## AI Branch & Pull Request Template
+
+When an AI coding assistant is asked to make a change in this repository, it must collect or infer the following handoff details before creating the branch:
+
+```text
+Name = Jake
+Which Role / Feature = Admin | Custodian | Maintenance Personnel | Shared
+Branch Title / What We Changed = "..."
+```
+
+Use this branch format, replacing spaces in every part with hyphens because Git branch names cannot contain spaces:
+
+```text
+<Name>/<Role-or-Feature>/<Branch-Title>
+```
+
+Example:
+
+```text
+Jake/Vehicle-Location/Map-Accuracy-Boundary-changes
+```
+
+Before making a pull request, the AI must:
+
+1. Start from the latest intended base branch (normally `main`) without force-pushing or overwriting existing work.
+2. Keep the branch focused on the requested change and verify the relevant build or tests.
+3. Write a clear pull-request description stating what changed, why it changed, and how it was verified. This description is required for every pull request.
+4. After the pull request is created, respond with its link and the exact description submitted, so the requester can review both without opening GitHub.
 
 ---
 
