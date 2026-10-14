@@ -55,6 +55,7 @@ Before making a pull request, the AI must:
 1. Start from the latest intended base branch (normally `main`) without force-pushing or overwriting existing work.
 2. Keep the branch focused on the requested change and verify the relevant build or tests.
 3. Write a clear pull-request description stating what changed, why it changed, and how it was verified. This description is required for every pull request.
+4. After the pull request is created, respond with its link and the exact description submitted, so the requester can review both without opening GitHub.
 
 ---
 
