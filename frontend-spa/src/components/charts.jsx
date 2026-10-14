@@ -72,7 +72,6 @@ export function DonutChart({ segments, centerLabel, centerSubLabel }) {
           >
             {pieData.map((seg) => <Cell key={seg.label} fill={seg.color} />)}
           </Pie>
-          {data.length > 0 && <Tooltip content={pieTooltip} />}
         </PieChart>
       </ResponsiveContainer>
       <div className="donut-center">
