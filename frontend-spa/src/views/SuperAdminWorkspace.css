@@ -10,6 +10,19 @@ html:root[data-theme] .superadmin-shell .page-heading-row { display:flex; justif
 html:root[data-theme] .superadmin-shell .page-heading-text p { margin:6px 0 0; font-size:14px; line-height:1.5; color:var(--sa-muted); max-width:none; }
 html:root[data-theme] .superadmin-shell .topbar { min-height:64px; padding:10px 20px; }
 html:root[data-theme] .superadmin-shell .topbar select { min-height:32px; max-width:180px; }
+html:root[data-theme] .superadmin-shell .topbar select:disabled {
+  opacity:1;
+  color:var(--sa-text);
+  -webkit-text-fill-color:var(--sa-text);
+  background-color:var(--sa-surface);
+  cursor:not-allowed;
+}
+html:root[data-theme] .superadmin-shell .topbar .dev-impersonate button:disabled {
+  opacity:1;
+  color:#fff;
+  background:#2563eb;
+  cursor:not-allowed;
+}
 html:root[data-theme] .superadmin-shell .module-nav > button { font-size:13px; }
 .superadmin-shell .superadmin-tab { gap:20px; min-width:0; }
 .superadmin-shell .sa-management-card { min-width:0; border:1px solid var(--sa-border); border-radius:12px; background:var(--sa-surface); overflow:hidden; }
@@ -198,3 +211,13 @@ html:root[data-theme] .superadmin-shell .topbar .icon-btn { background: var(--sa
 html[data-theme="dark"] .superadmin-shell .sa-text-button { color: #93c5fd; }
 html[data-theme="dark"] .superadmin-shell .workspace-footer { padding-left: 276px; }
 @media (max-width: 1100px) { html[data-theme="dark"] .superadmin-shell .workspace-footer { padding-left: 100px; } }
+
+.superadmin-shell .boundary-registration-preview { margin-top:16px; overflow:hidden; border:1px solid var(--sa-border); border-radius:10px; background:var(--sa-subtle); }
+.superadmin-shell .boundary-registration-preview-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:14px 16px; border-bottom:1px solid var(--sa-border); background:var(--sa-surface); }
+.superadmin-shell .boundary-registration-preview-head div { display:grid; gap:4px; }
+.superadmin-shell .boundary-registration-preview-head strong { font-size:12px; text-transform:uppercase; letter-spacing:.025em; }
+.superadmin-shell .boundary-registration-preview-head span, .superadmin-shell .boundary-registration-preview-head small { color:var(--sa-muted); font-size:12px; }
+.superadmin-shell .boundary-registration-map { height:330px; background:#e2e8f0; }
+.superadmin-shell .boundary-registration-empty, .superadmin-shell .boundary-registration-note { margin:0; padding:16px; font-size:12px; line-height:1.55; }
+.superadmin-shell .boundary-registration-note { border-top:1px solid var(--sa-border); }
+@media(max-width:600px) { .superadmin-shell .boundary-registration-map { height:250px; } .superadmin-shell .boundary-registration-preview-head { flex-direction:column; } }

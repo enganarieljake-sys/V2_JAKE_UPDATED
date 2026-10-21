@@ -168,6 +168,7 @@ Route::middleware(['auth:sanctum', EnsureUserIsActive::class, RestrictSuperAdmin
     Route::post('/superadmin/barangays/{barangay}/registration-code/regenerate', [SuperAdminController::class, 'regenerateRegistrationCode']);
     Route::post('/superadmin/barangays/{barangay}/boundary/refresh', [SuperAdminController::class, 'refreshBarangayBoundary']);
     Route::post('/superadmin/barangays/{barangay}/boundary/confirm', [SuperAdminController::class, 'confirmBarangayBoundary']);
+    Route::post('/superadmin/barangays/{barangay}/boundary/candidate', [SuperAdminController::class, 'uploadBoundaryCandidate']);
     Route::delete('/superadmin/barangays/{barangay}/boundary/pending', [SuperAdminController::class, 'discardPendingBoundary']);
     Route::get('/superadmin/activity-log', [SuperAdminController::class, 'activityLog']);
     Route::get('/superadmin/concern-reports', [SuperAdminController::class, 'concernReports']);
@@ -299,8 +300,10 @@ Route::middleware(['auth:sanctum', EnsureUserIsActive::class, RestrictSuperAdmin
 
     // Archived ticket audit log — a "Closed" entry is permanently locked, but
     // a "Deleted" entry (an accidental delete that had real progress on it)
-    // can be reopened.
+    // can be reopened. Archive deletion retains the snapshot for recovery.
     Route::get('/ticket-archives', [TicketController::class, 'archives']);
+    Route::delete('/ticket-archives/{archive}', [TicketController::class, 'deleteArchive']);
+    Route::put('/ticket-archives/{archive}/restore', [TicketController::class, 'restoreArchive'])->withTrashed();
     // Cannibalization: direct, final records of parts moved between vehicles
     // (no approval step, and deliberately no update/delete routes).
     Route::get('/cannibalizations', [CannibalizationController::class, 'index']);

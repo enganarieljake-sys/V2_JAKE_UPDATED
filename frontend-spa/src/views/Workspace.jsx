@@ -1,8 +1,13 @@
+import LoadingOverlay from '../components/LoadingOverlay';
 import EndImpersonationAction from '../components/EndImpersonationAction';
 import './TicketCreation.css';
+import './ScheduleForm.css';
+import './MaintenanceDetails.css';
+import FileCabinet from '../components/FileCabinet';
 import VMSLogo from '../components/VMSLogo';
 import { Children, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, createContext, Fragment } from 'react';
 import { createPortal } from 'react-dom';
+import RepairFileCabinet from '../components/RepairFileCabinet';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../api/axios';
 import LocationDensityMap from '../components/LocationDensityMap';
@@ -14,8 +19,7 @@ import WorkspaceFooter from '../components/WorkspaceFooter';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { DonutChart, SolidPieChart, StackedBarChart } from '../components/charts';
 import { AuthContext } from '../context/AuthContextObject';
-import { PAKNAAN_POLYGON } from '../data/paknaanLocationDensity';
-import { geoJsonToRings, isPointWithinBoundaryRings } from '../utils/boundary';
+import { geoJsonToPolygons, isPointWithinBoundaryPolygons, isLocationPointAllowed } from '../utils/boundary';
 import { geocodeAddress, reverseGeocode } from '../utils/geocode';
 
 const FormNoticeContext = createContext(null);
@@ -140,7 +144,7 @@ const modulesByRole = {
     // no separate "Register Vehicle" row for the same page.
     { section: 'Vehicles', icon: 'vehicle', items: [
       ['vehicles', 'View Vehicles'],
-      ['histories', 'Vehicle History'],
+      ['conditions', 'Condition Monitoring'],
     ] },
     // 'reportOrPropose' ('issues' module under the hood) is the Issue
     // Reports list, with a "Report Vehicle Issue" action and a "Propose
@@ -153,7 +157,6 @@ const modulesByRole = {
     { section: 'Vehicle Operations', icon: 'checkCircle', items: [
       ['reportOrPropose', 'Report Vehicle Issue'],
       ['myTasks', 'My Tasks'],
-      ['conditions', 'Condition Monitoring'],
     ] },
     { section: 'Maintenance', icon: 'calendar', items: [
       ['schedules', 'Maintenance Schedule'],
@@ -163,6 +166,7 @@ const modulesByRole = {
       // record.verify branch), matching Admin's "no tabs" reference design.
       ['maintenance', 'Maintenance Records'],
     ] },
+    { section: 'History', items: [['histories', 'Vehicle History']] },
   ],
   'Maintenance Personnel': [
     // "View Vehicles" used to sit alone under its own collapsible "Vehicles"
@@ -903,6 +907,7 @@ function Workspace() {
   const [archiveStart, setArchiveStart] = useState('');
   const [archiveEnd, setArchiveEnd] = useState('');
   const [archiveStatusFilter, setArchiveStatusFilter] = useState('');
+  const [showDeletedArchives, setShowDeletedArchives] = useState(false);
 
   // Condition Monitoring Filters
   const [condFilterStartDate, setCondFilterStartDate] = useState('');
@@ -1993,6 +1998,7 @@ function Workspace() {
     }
 
     if (activeModule === 'ticketArchives') {
+      result = result.filter((row) => showDeletedArchives ? !!row.deleted_at || row.final_status === 'Deleted' : !row.deleted_at && row.final_status !== 'Deleted');
       if (archiveStart) {
         result = result.filter((row) => row.archived_at && row.archived_at.substring(0, 10) >= archiveStart);
       }
@@ -2077,7 +2083,7 @@ function Workspace() {
     }
 
     return result;
-  }, [rawRows, searchQuery, filterCategory, filterCapacity, filterLocation, filterDomain, filterStatus, filterPriority, filterReadiness, filterIssueType, filterMaintType, filterSource, filterActive, filterAssignedTo, filterVerdict, filterCheckedBy, filterActivityType, filterVehicle, filterMechanic, filterCustodian, filterDateStart, filterDateEnd, activeModule, condFilterStartDate, condFilterEndDate, archiveStart, archiveEnd, archiveStatusFilter]);
+  }, [rawRows, searchQuery, filterCategory, filterCapacity, filterLocation, filterDomain, filterStatus, filterPriority, filterReadiness, filterIssueType, filterMaintType, filterSource, filterActive, filterAssignedTo, filterVerdict, filterCheckedBy, filterActivityType, filterVehicle, filterMechanic, filterCustodian, filterDateStart, filterDateEnd, activeModule, condFilterStartDate, condFilterEndDate, archiveStart, archiveEnd, archiveStatusFilter, showDeletedArchives]);
 
   // Status breakdown for the Vehicle Management stat cards — counted from the
   // full unfiltered fetch so the cards stay accurate regardless of the active
@@ -2296,7 +2302,7 @@ function Workspace() {
     () => vehicleColumns(user, (row) => openVehicleProfile(row, 'edit'), deleteRecord, restoreRecord, filterStatus, openTicketProfile, (row) => setReadinessPromptTarget(row), (row) => setDispatchTarget(row)),
     [user, openVehicleProfile, deleteRecord, restoreRecord, filterStatus, openTicketProfile],
   );
-  const vehicleColumnChooser = useColumnChooser('vms_vehicle_columns', vehicleColumnDefs);
+  const vehicleColumnChooser = useColumnChooser('vms_vehicle_columns_v2', vehicleColumnDefs);
 
   // Every other module's table gets the same Choose Columns / drag-to-reorder
   // treatment as Vehicle Management above — one useColumnChooser call per
@@ -2372,59 +2378,29 @@ function Workspace() {
   );
   const logColumnChooser = useColumnChooser('vms_activity_log_columns', logColumnDefs);
 
-  const archiveColumnDefs = useMemo(() => [
+  const archiveColumnDefs = [
     ...ticketArchiveColumns,
     {
       key: 'actions',
       label: 'Actions',
       locked: true,
       className: 'cell-center',
-      render: (row) => {
-        if (row.final_status === 'Deleted') {
-          return (
-            <div className="row-actions">
-              <button
-                className="btn-reopen-action icon-btn"
-                type="button"
-                title="Reopen Ticket"
-                aria-label="Reopen Ticket"
-                onClick={() => {
-                  setConfirmDialog({
-                    title: 'Reopen Deleted Ticket',
-                    message: `Are you sure you want to reopen Ticket #${row.ticket_id} for ${row.vehicle_name}? It will be restored with all its sub-issues to how they were before it was deleted.`,
-                    confirmLabel: 'Reopen Ticket',
-                    variant: 'primary',
-                    onConfirm: () => ticketAction(`/ticket-archives/${row.archive_id}/reopen`, {}, 'Ticket successfully reopened.'),
-                  });
-                }}
-              >
-                <Icon name="undo" size={14} />
-              </button>
-            </div>
-          );
-        }
-        // A Closed ticket is permanently locked (no Reopen), but its
-        // record still exists — the Admin can still open it read-only
-        // to see the full history of what was done.
-        if (row.final_status === 'Closed') {
-          return (
-            <div className="row-actions">
-              <button
-                className="btn-view-action icon-btn"
-                type="button"
-                title="View Ticket"
-                aria-label="View Ticket"
-                onClick={() => openTicketProfile({ ticket_id: row.ticket_id })}
-              >
-                <Icon name="eye" size={14} />
-              </button>
-            </div>
-          );
-        }
-        return <span className="muted">—</span>;
-      },
+      render: (row) => (
+        <div className="row-actions">
+          {row.final_status === 'Closed' && <button className="btn-view-action icon-btn" type="button" title="View Ticket" aria-label="View Ticket" onClick={() => openTicketProfile({ ticket_id: row.ticket_id })}><Icon name="eye" size={14} /></button>}
+          {row.deleted_at || row.final_status === 'Deleted' ? (
+            <button className="btn-reopen-action icon-btn" type="button" title="Restore Ticket" aria-label="Restore Ticket" onClick={() => setConfirmDialog({
+              title: 'Restore Ticket', message: row.deleted_at ? 'Restore this record to Archived Tickets?' : 'Restore this deleted ticket and its recorded repair progress?', confirmLabel: 'Restore', variant: 'primary',
+              onConfirm: () => ticketAction('/ticket-archives/' + row.archive_id + (row.deleted_at ? '/restore' : '/reopen'), {}, 'Ticket restored.'),
+            })}><Icon name="undo" size={14} /></button>
+          ) : <button className="btn-delete-action icon-btn" type="button" title="Delete Archived Ticket" aria-label="Delete Archived Ticket" onClick={() => setConfirmDialog({
+            title: 'Delete Archived Ticket', message: 'Move this archived record to Deleted Tickets? You can restore it later.', confirmLabel: 'Delete', variant: 'danger',
+            onConfirm: async () => { try { await api.delete('/ticket-archives/' + row.archive_id); await refreshCurrent(); } catch (err) { setNotice({ type: 'error', text: err.response?.data?.message || 'Could not delete archived ticket.' }); } },
+          })}><Icon name="trash" size={14} /></button>}
+        </div>
+      ),
     },
-  ], [setConfirmDialog, openTicketProfile]);
+  ];
   const archiveColumnChooser = useColumnChooser('vms_ticket_archive_columns', archiveColumnDefs);
 
   const unreadCount = notifications.filter((n) => !n.read_at).length;
@@ -2491,39 +2467,22 @@ function Workspace() {
       setNotice({ type: 'error', text: 'Could not impersonate that account.' });
     }
   };
-  // Vehicle Location map boundary selector — lets an Admin swap which
-  // barangay outline the map draws. Scoped to Province + Barangay only
-  // (no City/Municipality step) since Mandaue City is the only city with
-  // real per-barangay boundary data today — defaults to Cebu so the
-  // Barangay dropdown is immediately usable. This is purely cosmetic:
-  // hubs/vehicles aren't scoped by barangay, so switching only changes the
-  // drawn outline + camera framing, not which hubs/vehicles show.
+  // Registered province/city/barangay cascade. Defaults to the current account's exact tenant.
   const [mapProvinces, setMapProvinces] = useState([]);
   const [mapProvinceId, setMapProvinceId] = useState('');
+  const [mapCityId, setMapCityId] = useState('');
+  const mapBoundaryRequestRef = useRef(0);
+  const mapBarangaysRequestRef = useRef(0);
   const [mapBarangays, setMapBarangays] = useState([]);
   const [mapBarangayId, setMapBarangayId] = useState('');
-  const [mapBoundaryOverride, setMapBoundaryOverride] = useState(null);
-  // Same "what counts as inside the service area" boundary the map draws,
-  // recomputed here so the Add Location form can reject a geocoded address
-  // that falls outside it — mirrors LocationDensityMap's own fallback (the
-  // hardcoded Paknaan outline when no barangay override is selected, or the
-  // override has no boundary geometry on file).
-  const locationBoundaryRings = useMemo(() => {
-    const overrideRings = geoJsonToRings(mapBoundaryOverride?.geometry);
-    return overrideRings.length ? overrideRings : [PAKNAAN_POLYGON];
+  const [mapBoundaryOverride, setMapBoundaryOverride] = useState({ geometry: null, label: 'Loading barangay boundary' });
+  // Location entry uses only the selected barangay geometry; absent boundaries stay absent.
+  const locationBoundaryPolygons = useMemo(() => {
+    const overrideRings = geoJsonToPolygons(mapBoundaryOverride?.geometry);
+    return overrideRings;
   }, [mapBoundaryOverride]);
-  const locationBoundaryLabel = mapBoundaryOverride?.label ?? 'Paknaan';
-  // Guards the one-time "default to Paknaan" seed below from re-firing on a
-  // second effect invocation (React's dev-only StrictMode double-invokes
-  // effects on mount) — without this, a second run would call
-  // loadBarangaysForProvince(cebu.id, 'Paknaan') again.
-  const mapDefaultAppliedRef = useRef(false);
-  // The bigger race: that seed is 2 sequential API calls deep (province ->
-  // barangay list -> boundary fetch), slow enough on the local dev server
-  // that an admin can pick a real barangay from the dropdown WHILE it's
-  // still in flight. When it finally resolves, it must not overwrite a
-  // selection made in the meantime — this ref is the source of truth for
-  // "has the admin touched this dropdown themselves".
+  const locationBoundaryLabel = mapBoundaryOverride?.label ?? 'Barangay boundary';
+  // Preserve manual choices when the initial account lookup is still in flight.
   const userPickedBarangayRef = useRef(false);
 
   // DEV-only: the same two dropdowns also drive Impersonate below, so a
@@ -2543,7 +2502,7 @@ function Workspace() {
   const barangayOptions = useMemo(() => {
     const byId = new Map(mapBarangays.map((b) => [String(b.id), b]));
     impersonateCandidates.forEach((u) => {
-      if (u.barangay_id && String(u.province_id) === String(mapProvinceId) && !byId.has(String(u.barangay_id))) {
+      if (u.barangay_id && String(u.province_id) === String(mapProvinceId) && String(u.city_id) === String(mapCityId) && !byId.has(String(u.barangay_id))) {
         byId.set(String(u.barangay_id), { id: u.barangay_id, name: u.barangay_name });
       }
     });
@@ -2557,7 +2516,7 @@ function Workspace() {
       byId.set(String(mapBarangayId), { id: mapBarangayId, name: mapBoundaryOverride.label });
     }
     return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [mapBarangays, impersonateCandidates, mapProvinceId, mapBarangayId, mapBoundaryOverride]);
+  }, [mapBarangays, impersonateCandidates, mapProvinceId, mapCityId, mapBarangayId, mapBoundaryOverride]);
   // Keeps the Impersonate staff dropdown valid for whichever barangay is
   // currently selected above — re-runs whenever the barangay changes or the
   // candidate list itself first loads.
@@ -2580,113 +2539,82 @@ function Workspace() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapBarangayId, impersonateCandidates]);
 
-  // Fetches one barangay's boundary and sets it as the map override.
   const selectBarangayBoundary = useCallback(async (barangayId) => {
-    if (!barangayId) { setMapBoundaryOverride(null); return; }
+    const requestId = ++mapBoundaryRequestRef.current;
+    if (!barangayId) { setMapBoundaryOverride({ geometry: null, label: 'No barangay selected' }); return; }
     try {
-      const res = await api.get(`/barangays/${barangayId}`);
-      // Always carry the picked barangay's own name, even when it has no
-      // boundary polygon on file (only Mandaue City barangays do today) —
-      // otherwise the map silently falls back to Paknaan's shape AND label,
-      // which reads as "the dropdown did nothing" instead of "no data yet".
-      // Qualified with the city name whenever we have one — several
-      // barangay names repeat across neighboring cities (e.g. "Banilad"
-      // exists in both Mandaue City and Cebu City), so a bare name on the
-      // map reads as ambiguous, or worse, as the wrong city's barangay.
-      const label = res.data.city_name ? `${res.data.name}, ${res.data.city_name}` : res.data.name;
-      setMapBoundaryOverride({ geometry: res.data.boundary ?? null, label });
+      const { data } = await api.get('/barangays/' + barangayId);
+      if (requestId !== mapBoundaryRequestRef.current) return;
+      const label = data.city_name ? data.name + ', ' + data.city_name : data.name;
+      setMapBoundaryOverride({ geometry: data.boundary ?? null, label, barangayName: data.name, cityName: data.city_name, source: data.boundary_source, psgcCode: data.psgc_code, verified: data.boundary_verified === true });
     } catch {
-      setMapBoundaryOverride(null);
+      if (requestId === mapBoundaryRequestRef.current) setMapBoundaryOverride({ geometry: null, label: 'Boundary unavailable' });
     }
   }, []);
 
-  // Loads the barangays that actually have a registered user (plus Paknaan,
-  // always included — the system's built-in home barangay) for the one
-  // city within a province that has a registered barangay list. Which city
-  // that is comes straight from `/provinces/with-barangays`'
-  // `city_with_barangays_id` (see ProvinceController::withBarangays) rather
-  // than being re-derived here — this used to search the province's city
-  // list for one literally named "Mandaue City", which only worked because
-  // that was the sole seeded example; a second city with real barangay data
-  // in any province would have silently produced an empty dropdown. A
-  // province with no such city (falsy `cityId`) simply ends up with an
-  // empty Barangay dropdown. `defaultBarangayName` pre-selects a barangay
-  // once the list loads — used to land on Paknaan on first load.
-  const loadBarangaysForProvince = useCallback(async (cityId, defaultBarangayName) => {
-    if (!cityId) {
-      setMapBarangays([]);
-      return;
-    }
+  const loadMapBarangays = useCallback(async (cityId) => {
+    const requestId = ++mapBarangaysRequestRef.current;
+    if (!cityId) { setMapBarangays([]); return; }
     try {
-      const barangaysRes = await api.get('/barangays/registered', { params: { city_id: cityId } });
-      setMapBarangays(barangaysRes.data);
-
-      // Skip applying the default if the admin has already picked a real
-      // barangay themselves while this chain was still in flight — this
-      // check happens as late as possible (right before acting on it) so
-      // it catches a pick made at any point during the 3-call chain above.
-      const defaultBarangay = defaultBarangayName && !userPickedBarangayRef.current
-        ? barangaysRes.data.find((b) => b.name === defaultBarangayName)
-        : null;
-      if (defaultBarangay) {
-        setMapBarangayId(String(defaultBarangay.id));
-        selectBarangayBoundary(defaultBarangay.id);
-      }
+      const { data } = await api.get('/barangays/registered', { params: { city_id: cityId } });
+      if (requestId === mapBarangaysRequestRef.current) setMapBarangays(data);
     } catch {
-      setMapBarangays([]);
+      if (requestId === mapBarangaysRequestRef.current) setMapBarangays([]);
     }
-  }, [selectBarangayBoundary]);
+  }, []);
 
   useEffect(() => {
-    // Narrower than the registration form's /provinces — only provinces
-    // that actually have registered barangay/boundary data, so the
-    // dropdown doesn't list 80+ provinces with nothing behind them.
-    api.get('/provinces/with-barangays').then((response) => {
-      setMapProvinces(response.data);
-      const cebu = response.data.find((p) => p.name === 'Cebu');
-      if (cebu) {
-        setMapProvinceId(String(cebu.id));
-        if (!mapDefaultAppliedRef.current) {
-          mapDefaultAppliedRef.current = true;
-          // Land every admin on THEIR OWN barangay by default, not always
-          // Paknaan — that hardcoded default only ever made sense back when
-          // Paknaan was the only barangay in the system. Falls back to
-          // Paknaan only for an account with no barangay of its own (there
-          // isn't one today, but this keeps old behavior as the fallback).
-          if (user.barangay_id && !userPickedBarangayRef.current) {
-            setMapBarangayId(String(user.barangay_id));
-            selectBarangayBoundary(user.barangay_id);
-            loadBarangaysForProvince(cebu.city_with_barangays_id, null);
-          } else {
-            loadBarangaysForProvince(cebu.city_with_barangays_id, 'Paknaan');
-          }
-        } else {
-          // Still populate the barangay list for this province — just
-          // don't re-seed the default selection over a real one.
-          loadBarangaysForProvince(cebu.city_with_barangays_id, null);
-        }
+    let cancelled = false;
+    Promise.all([
+      api.get('/provinces/with-barangays'),
+      user.barangay_id ? api.get('/barangays/' + user.barangay_id) : Promise.resolve(null),
+    ]).then(([provinces, own]) => {
+      if (cancelled) return;
+      setMapProvinces(provinces.data);
+      if (userPickedBarangayRef.current) return;
+      const province = provinces.data.find((p) => String(p.id) === String(own?.data.province_id)) ?? provinces.data[0];
+      const cityId = own?.data.city_id ?? province?.cities?.[0]?.id ?? '';
+      setMapProvinceId(String(province?.id ?? ''));
+      setMapCityId(String(cityId));
+      loadMapBarangays(cityId);
+      if (own) {
+        setMapBarangayId(String(own.data.id));
+        const label = own.data.city_name ? own.data.name + ', ' + own.data.city_name : own.data.name;
+        setMapBoundaryOverride({ geometry: own.data.boundary ?? null, label, barangayName: own.data.name, cityName: own.data.city_name, source: own.data.boundary_source, psgcCode: own.data.psgc_code, verified: own.data.boundary_verified === true });
+      } else {
+        setMapBoundaryOverride({ geometry: null, label: 'No barangay selected' });
       }
-    }).catch(() => {});
-  }, [loadBarangaysForProvince, selectBarangayBoundary, user.barangay_id]);
+    }).catch(() => {
+      if (!cancelled) setMapBoundaryOverride({ geometry: null, label: 'Boundary unavailable' });
+    });
+    return () => { cancelled = true; };
+  }, [loadMapBarangays, user.barangay_id]);
 
-  const handleMapProvinceChange = (e) => {
+  const handleMapProvinceChange = (event) => {
     userPickedBarangayRef.current = true;
-    const provinceId = e.target.value;
+    const provinceId = event.target.value;
+    const cityId = mapProvinces.find((p) => String(p.id) === String(provinceId))?.cities?.[0]?.id ?? '';
     setMapProvinceId(provinceId);
+    setMapCityId(String(cityId));
     setMapBarangayId('');
-    setMapBoundaryOverride(null);
     setMapBarangays([]);
-    if (provinceId) {
-      const province = mapProvinces.find((p) => String(p.id) === String(provinceId));
-      loadBarangaysForProvince(province?.city_with_barangays_id ?? null);
-    }
+    selectBarangayBoundary(null);
+    loadMapBarangays(cityId);
   };
 
-  const handleMapBarangayChange = (e) => {
+  const handleMapCityChange = (event) => {
     userPickedBarangayRef.current = true;
-    const barangayId = e.target.value;
-    setMapBarangayId(barangayId);
-    selectBarangayBoundary(barangayId);
+    setMapCityId(event.target.value);
+    setMapBarangayId('');
+    setMapBarangays([]);
+    selectBarangayBoundary(null);
+    loadMapBarangays(event.target.value);
+  };
+
+  const handleMapBarangayChange = (event) => {
+    userPickedBarangayRef.current = true;
+    setMapBarangayId(event.target.value);
+    selectBarangayBoundary(event.target.value);
   };
 
   // Sidebar badge for a given module key — 'myTasks' has no badge_counts
@@ -2756,22 +2684,10 @@ function Workspace() {
                 <option key={province.id} value={province.id}>{province.name}</option>
               ))}
             </select>
-            {/* Province > City > Barangay > Impersonation. Each province carries
-                the one city that has barangay data today, so City is derived
-                from the chosen province (it can't diverge from it). */}
-            <select
-              aria-label="Map boundary city"
-              disabled={!mapProvinces.find((pr) => String(pr.id) === String(mapProvinceId))?.city_with_barangays_name}
-              value={mapProvinces.find((pr) => String(pr.id) === String(mapProvinceId))?.city_with_barangays_id ?? ''}
-              onChange={() => {}}
-            >
-              {mapProvinces.find((pr) => String(pr.id) === String(mapProvinceId))?.city_with_barangays_name
-                ? (
-                  <option value={mapProvinces.find((pr) => String(pr.id) === String(mapProvinceId)).city_with_barangays_id}>
-                    {mapProvinces.find((pr) => String(pr.id) === String(mapProvinceId)).city_with_barangays_name}
-                  </option>
-                )
-                : <option value="">No city</option>}
+            {/* Province > City > Barangay; each choice scopes the next list. */}
+            <select aria-label="Map boundary city" value={mapCityId} onChange={handleMapCityChange} disabled={!mapProvinceId}>
+              <option value="">Select city</option>
+              {(mapProvinces.find((province) => String(province.id) === String(mapProvinceId))?.cities ?? []).map((city) => <option key={city.id} value={city.id}>{city.name}</option>)}
             </select>
             <select
               aria-label="Map boundary barangay"
@@ -3066,8 +2982,9 @@ function Workspace() {
           ) : isNewLocationPage ? (
             <NewLocationPage
               onBack={() => returnToModule('locations')}
-              boundaryRings={locationBoundaryRings}
+              boundaryPolygons={locationBoundaryPolygons}
               boundaryLabel={locationBoundaryLabel}
+              boundaryVerified={mapBoundaryOverride?.verified === true}
               onSubmit={async (hub) => {
                 await api.post('/hubs', hub);
                 setNotice({ type: 'success', text: 'Location added.' });
@@ -3079,8 +2996,9 @@ function Workspace() {
             <EditLocationPage
               row={locationRows.find((r) => String(r.vehicle_id) === String(editLocationVehicleId)) ?? null}
               allHubs={allHubs}
-              boundaryRings={locationBoundaryRings}
+              boundaryPolygons={locationBoundaryPolygons}
               boundaryLabel={locationBoundaryLabel}
+              boundaryVerified={mapBoundaryOverride?.verified === true}
               onBack={() => returnToModule('locations')}
               onSubmit={async ({ name, lat, lng, label, addressArea, remarks }) => {
                 // Reuse the hub if that name already exists (case-insensitive
@@ -3217,6 +3135,8 @@ function Workspace() {
               submitLabel={editScheduleId ? 'Update Schedule' : (canDo(user, 'schedule.create') ? 'Add Schedule' : 'Send Suggestion')}
               contextVehicles={lookups.vehicles}
               hubs={allHubs}
+              wrapperClassName="schedule-entry-form"
+              compactVehiclePreview
               onDirty={() => setHasUnsavedChanges(true)}
             />
           ) : viewIssueId ? (
@@ -4365,7 +4285,6 @@ function Workspace() {
           <div className="panel-header-bar schedule-panel-header">
             <div className="schedule-panel-heading">
               <div><h3>Maintenance Schedules</h3><p>Upcoming, overdue, and completed maintenance activities.</p></div>
-              <span className="schedule-count-badge">{visibleRows.length} schedules</span>
             </div>
             <div className="schedule-panel-tools">
               <ViewModeDropdown value={scheduleViewMode} onChange={changeScheduleViewMode} />
@@ -4545,7 +4464,6 @@ function Workspace() {
           <div className="panel-header-bar">
             <h3>Activity Log <span className="count-badge">{visibleRows.length}</span></h3>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <GenerateReportButton rows={visibleRows} />
               <LocalSearchInput value={searchQuery} onChange={setSearchQuery} placeholder="Search logs..." columnChooser={logsView === 'list' ? logColumnChooser : undefined} />
             </div>
           </div>
@@ -4669,7 +4587,7 @@ function Workspace() {
 
       return (
         <ModulePanel
-          description="Immutable audit trail of all completed and closed maintenance tickets."
+          description="Completed maintenance tickets and recoverable deleted records."
           filterBar={
             <div className="filter-bar-container" style={{ flexWrap: 'wrap', gap: '8px 12px', alignItems: 'center' }}>
               <div className="filter-label"><span>Vehicle:</span></div>
@@ -4796,11 +4714,12 @@ function Workspace() {
               <button type="button" className="ghost-button" style={{ marginRight: 10 }} onClick={() => setActiveModule('tickets')}>
                 <Icon name="arrowLeft" size={14} /> Tickets
               </button>
-              Archived Tickets <span className="count-badge">{visibleRows.length}</span>
+              {showDeletedArchives ? 'Deleted Tickets' : 'Archived Tickets'} <span className="count-badge">{visibleRows.length}</span>
               {visibleRows.length !== allArchiveRows.length && (
                 <span style={{ fontWeight: 400, fontSize: '0.8rem', marginLeft: 6 }}>of {allArchiveRows.length} total</span>
               )}
             </h3>
+            <label className="archive-deleted-toggle"><input type="checkbox" checked={showDeletedArchives} onChange={(e) => setShowDeletedArchives(e.target.checked)} />Deleted Tickets</label>
             <LocalSearchInput value={searchQuery} onChange={setSearchQuery} placeholder="Search archives..." columnChooser={archiveColumnChooser} />
           </div>
 
@@ -4814,7 +4733,7 @@ function Workspace() {
           <PaginatedTable
             columns={archiveColumnChooser.visibleColumns}
             onReorderColumn={archiveColumnChooser.reorderColumn}
-            emptyMessage="No archived tickets yet — completed tickets are stored here automatically."
+            emptyMessage={showDeletedArchives ? "No deleted tickets." : "No archived tickets yet — completed tickets are stored here automatically."}
             rows={visibleRows}
           />
         </ModulePanel>
@@ -6015,15 +5934,7 @@ function SmartForm({ fields, initialValues = EMPTY_OBJ, onCancel, cancelLabel = 
           </div>
         </div>
       )}
-      {submitting && createPortal(
-        <div className="loading-overlay">
-          <div className="loading-overlay-card">
-            <Icon name="gear" size={34} className="loading-overlay-gear" filled />
-            <span>Loading…</span>
-          </div>
-        </div>,
-        document.body
-      )}
+      {submitting && <LoadingOverlay />}
       <h3>{title}</h3>
       {(() => {
         const renderField = (field) => {
@@ -6035,10 +5946,11 @@ function SmartForm({ fields, initialValues = EMPTY_OBJ, onCancel, cancelLabel = 
         const fieldHasValue = Array.isArray(rawFieldValue)
           ? rawFieldValue.some((v) => String(v ?? '').trim() !== '')
           : rawFieldValue !== undefined && rawFieldValue !== null && String(rawFieldValue).trim() !== '';
+        const FieldWrapper = ['file', 'multi-file'].includes(field.type) ? 'div' : 'label';
         return (
         <Fragment key={field.name}>
-        <label
-          className={[field.compactFile ? 'file-inline' : null, fieldHasValue ? 'has-value' : null, fieldErrors[field.name] ? 'has-error' : null].filter(Boolean).join(' ') || undefined}
+        <FieldWrapper
+          className={[['file', 'multi-file'].includes(field.type) ? 'cabinet-field' : null, field.compactFile ? 'file-inline' : null, fieldHasValue ? 'has-value' : null, fieldErrors[field.name] ? 'has-error' : null].filter(Boolean).join(' ') || undefined}
           style={field.fullWidth ? { gridColumn: '1 / -1' } : undefined}
         >
           <span style={field.action ? { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } : undefined}>
@@ -6301,142 +6213,25 @@ function SmartForm({ fields, initialValues = EMPTY_OBJ, onCancel, cancelLabel = 
               value={values[field.name] ?? ''}
             />
           ) : null}
-          {field.type === 'file' ? (
-            <div className={`photo-box${isFile(values[field.name]) || field.existingUrl ? ' has-file' : ''}`}>
-              <input
-                accept={field.accept}
-                className="photo-box-input"
-                id={`photo-box-input-${field.name}`}
-                name={field.name}
-                onChange={handleChange}
-                required={field.required}
-                type="file"
-              />
-              <label className="photo-box-add-btn" htmlFor={`photo-box-input-${field.name}`}>
-                <Icon name="plus" size={10} />
-                {isFile(values[field.name]) || field.existingUrl ? 'Change Image' : 'Add Image'}
-              </label>
-              {isFile(values[field.name]) ? (
-                <button
-                  type="button"
-                  className="photo-box-remove"
-                  onClick={() => {
-                    const next = { ...values, [field.name]: null };
-                    setValues(next);
-                    onValuesChange?.(next);
-                  }}
-                  title="Remove image"
-                  aria-label="Remove image"
-                >
-                  <Icon name="trash" size={13} />
-                </button>
-              ) : null}
-              {isFile(values[field.name]) ? (
-                values[field.name].type.startsWith('image/') ? (
-                  <img alt={field.label} className="photo-box-fill" src={URL.createObjectURL(values[field.name])} />
-                ) : (
-                  <div className="photo-box-file">
-                    <Icon name="clipboard" size={28} />
-                    <span>{values[field.name].name}</span>
-                  </div>
-                )
-              ) : field.existingUrl ? (
-                // Not a freshly-picked File — the vehicle's already-saved photo,
-                // shown so editing doesn't look like it wiped out the photo that
-                // was there all along. No remove button here: the backend only
-                // ever replaces photo_url when a new file is uploaded, it has no
-                // "clear the photo" path, so offering removal would be a lie.
-                <img alt={field.label} className="photo-box-fill" src={resolvePhotoUrl(field.existingUrl)} />
-              ) : (
-                <div className="photo-box-empty">
-                  <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="4" width="18" height="15" rx="2" />
-                    <circle cx="9" cy="10" r="1.8" />
-                    <path d="M4.5 17.5 9 13l3 3 4-4.5 3.5 4" />
-                  </svg>
-                  <span>No image available</span>
-                </div>
-              )}
-            </div>
+          {['file', 'multi-file'].includes(field.type) ? (
+            <FileCabinet
+              name={field.name}
+              accept={field.accept}
+              required={field.required}
+              multiple={field.type === 'multi-file'}
+              files={field.type === 'multi-file' ? (Array.isArray(values[field.name]) ? values[field.name] : []) : (isFile(values[field.name]) ? [values[field.name]] : [])}
+              existingFiles={field.type === 'multi-file'
+                ? (field.existingAttachments ?? []).map((att) => ({ id: att.attachment_id, name: att.original_name || 'File', url: resolvePhotoUrl(att.file_url), original: att }))
+                : (!isFile(values[field.name]) && field.existingUrl ? [{ name: 'Saved ' + field.label.toLowerCase(), url: resolvePhotoUrl(field.existingUrl) }] : [])}
+              onRemoveExisting={field.onRemoveExisting}
+              onChange={(files) => {
+                const next = { ...values, [field.name]: field.type === 'multi-file' ? files : (files[0] ?? null) };
+                setValues(next);
+                setFieldErrors((current) => ({ ...current, [field.name]: undefined }));
+                onValuesChange?.(next);
+              }}
+            />
           ) : null}
-          {field.type === 'multi-file' ? (() => {
-            const existingFiles = Array.isArray(field.existingAttachments) ? field.existingAttachments : [];
-            const pendingFiles = Array.isArray(values[field.name]) ? values[field.name] : [];
-            const addFiles = (incoming) => {
-              const list = Array.from(incoming ?? []).filter(Boolean);
-              if (!list.length) return;
-              const next = { ...values, [field.name]: [...pendingFiles, ...list] };
-              setValues(next);
-              onValuesChange?.(next);
-            };
-            const inputId = `multi-file-input-${field.name}`;
-            return (
-              <div className="multi-file-field file-card-like">
-                <div className="multi-file-body">
-                  {existingFiles.length || pendingFiles.length ? (
-                    <div className="multi-file-list">
-                      {existingFiles.map((att) => (
-                        <div key={`existing-${att.attachment_id}`} className="multi-file-item is-existing">
-                          <Icon name="clipboard" size={14} />
-                          <a className="multi-file-name" href={resolvePhotoUrl(att.file_url)} target="_blank" rel="noreferrer">
-                            {att.original_name || 'File'}
-                          </a>
-                          {field.onRemoveExisting && (
-                            <button type="button" className="multi-file-remove" onClick={() => field.onRemoveExisting(att)} title="Remove file" aria-label="Remove file">
-                              <Icon name="close" size={12} />
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                      {pendingFiles.map((file, i) => (
-                        <div key={`pending-${file.name}-${i}`} className="multi-file-item">
-                          <Icon name="clipboard" size={14} />
-                          <span className="multi-file-name">{file.name}</span>
-                          <button
-                            type="button"
-                            className="multi-file-remove"
-                            onClick={() => {
-                              const next = { ...values, [field.name]: pendingFiles.filter((_, fi) => fi !== i) };
-                              setValues(next);
-                              onValuesChange?.(next);
-                            }}
-                            title="Remove file"
-                            aria-label="Remove file"
-                          >
-                            <Icon name="close" size={12} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="file-card-empty">No data</div>
-                  )}
-                  <label
-                    className="file-card-dropzone multi-file-dropzone"
-                    htmlFor={inputId}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
-                  >
-                    <input
-                      accept={field.accept}
-                      className="multi-file-input"
-                      id={inputId}
-                      multiple
-                      name={field.name}
-                      onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
-                      type="file"
-                    />
-                    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M7 18a4.5 4.5 0 0 1-1-8.9A5.5 5.5 0 0 1 16.7 7 4.5 4.5 0 0 1 18 18" />
-                      <path d="M12 12v7" />
-                      <path d="M9.5 14.5 12 12l2.5 2.5" />
-                    </svg>
-                    <span>Drag file here</span>
-                  </label>
-                </div>
-              </div>
-            );
-          })() : null}
           {field.inlineExtra ? (
             <div className="field-extra field-extra-inline">
               {typeof field.inlineExtra === 'function' ? field.inlineExtra(values) : field.inlineExtra}
@@ -6444,7 +6239,7 @@ function SmartForm({ fields, initialValues = EMPTY_OBJ, onCancel, cancelLabel = 
           ) : null}
           {fieldErrors[field.name] ? <small className="fx-error" role="alert">{fieldErrors[field.name]}</small> : null}
           {field.hint && !fieldErrors[field.name] ? <small className="field-hint">{field.hint}</small> : null}
-        </label>
+        </FieldWrapper>
         {field.extra ? (
           <div className="field-extra" style={{ gridColumn: field.extraGridColumn ?? '1 / -1' }}>
             {typeof field.extra === 'function' ? field.extra(values) : field.extra}
@@ -6493,8 +6288,9 @@ function LocationAddressMapForm({
   initialMarker = null,
   initialAddressArea = '',
   initialRemarks = '',
-  boundaryRings,
+  boundaryPolygons,
   boundaryLabel,
+  boundaryVerified = true,
   onBack,
   onSubmit,
 }) {
@@ -6548,7 +6344,7 @@ function LocationAddressMapForm({
           return;
         }
         setMarker({ lat: match.lat, lng: match.lng });
-        if (!isPointWithinBoundaryRings(match, boundaryRings)) {
+        if (!isLocationPointAllowed(match, boundaryPolygons, boundaryVerified)) {
           setError(`That address is outside the ${boundaryLabel} boundary — only locations within ${boundaryLabel} can be added.`);
         }
       } catch (err) {
@@ -6559,13 +6355,13 @@ function LocationAddressMapForm({
     }, 700);
 
     return () => clearTimeout(timer);
-  }, [address, boundaryRings, boundaryLabel]);
+  }, [address, boundaryPolygons, boundaryLabel, boundaryVerified]);
 
   const handleMapPick = useCallback(async (latLng) => {
     setMarker(latLng);
     setError(null);
 
-    if (!isPointWithinBoundaryRings(latLng, boundaryRings)) {
+    if (!isLocationPointAllowed(latLng, boundaryPolygons, boundaryVerified)) {
       setError(`That spot is outside the ${boundaryLabel} boundary — only locations within ${boundaryLabel} can be added.`);
       return;
     }
@@ -6584,9 +6380,9 @@ function LocationAddressMapForm({
     } finally {
       setLookingUp(false);
     }
-  }, [boundaryRings, boundaryLabel]);
+  }, [boundaryPolygons, boundaryLabel, boundaryVerified]);
 
-  const isPinValid = marker && isPointWithinBoundaryRings(marker, boundaryRings);
+  const isPinValid = marker && isLocationPointAllowed(marker, boundaryPolygons, boundaryVerified);
   const canSubmit = name.trim() && isPinValid && !lookingUp && !submitting;
 
   const handleSubmit = async (event) => {
@@ -6646,7 +6442,7 @@ function LocationAddressMapForm({
               onChange={(e) => setAddress(e.target.value)}
             />
             <small className="field-hint">
-              {lookingUp ? 'Looking up…' : `Must be within the ${boundaryLabel} boundary — you can also click the map to pinpoint it.`}
+              {lookingUp ? 'Looking up…' : boundaryVerified ? `Must be within the ${boundaryLabel} boundary — you can also click the map to pinpoint it.` : 'This outline is unverified. Confirm the address and pin; the reference outline does not restrict location entry.'}
             </small>
           </label>
           {isEdit && (
@@ -6674,19 +6470,20 @@ function LocationAddressMapForm({
           </div>
         </div>
         <div className="add-location-map-shell">
-          <AddLocationMap marker={marker} boundaryRings={boundaryRings} onPick={handleMapPick} />
+          {!boundaryVerified && <p className="notice info">Unverified reference outline. Check this location's address and pin before saving.{marker && !isPointWithinBoundaryPolygons(marker, boundaryPolygons) ? ' The pin is outside the imported outline.' : ''}</p>}
+          <AddLocationMap marker={marker} boundaryPolygons={boundaryPolygons} boundaryLabel={boundaryLabel} boundaryVerified={boundaryVerified} onPick={handleMapPick} />
         </div>
       </form>
     </ModulePanel>
   );
 }
 
-function NewLocationPage({ onBack, boundaryRings, boundaryLabel, onSubmit }) {
+function NewLocationPage({ onBack, boundaryPolygons, boundaryLabel, boundaryVerified, onSubmit }) {
   return (
     <LocationAddressMapForm
       mode="add"
-      boundaryRings={boundaryRings}
-      boundaryLabel={boundaryLabel}
+      boundaryPolygons={boundaryPolygons}
+      boundaryLabel={boundaryLabel} boundaryVerified={boundaryVerified}
       onBack={onBack}
       onSubmit={({ name, lat, lng, label }) => onSubmit({ name, lat, lng, label })}
     />
@@ -6700,7 +6497,7 @@ function NewLocationPage({ onBack, boundaryRings, boundaryLabel, onSubmit }) {
 // doesn't require a separate trip to Add Location first; the parent's
 // onSubmit decides whether the typed name matches an existing hub (reuse
 // it) or not (create it), same as Add Location's own POST /hubs.
-function EditLocationPage({ row, allHubs, boundaryRings, boundaryLabel, onBack, onSubmit }) {
+function EditLocationPage({ row, allHubs, boundaryPolygons, boundaryLabel, boundaryVerified, onBack, onSubmit }) {
   if (!row) {
     return (
       <ModulePanel description="Update a vehicle's current location.">
@@ -6722,8 +6519,8 @@ function EditLocationPage({ row, allHubs, boundaryRings, boundaryLabel, onBack, 
       initialMarker={currentHub ? { lat: currentHub.lat, lng: currentHub.lng } : null}
       initialAddressArea={row.address_area ?? ''}
       initialRemarks={row.remarks ?? ''}
-      boundaryRings={boundaryRings}
-      boundaryLabel={boundaryLabel}
+      boundaryPolygons={boundaryPolygons}
+      boundaryLabel={boundaryLabel} boundaryVerified={boundaryVerified}
       onBack={onBack}
       onSubmit={onSubmit}
     />
@@ -6846,43 +6643,12 @@ function DataTable({ columns, rows, compact = false, onRowClick, onReorderColumn
 // which stays on a long scrolled form while it saves). Portaled to <body>
 // like FormModal, so it sits above everything regardless of where it's
 // rendered from.
-function SubmitLoadingOverlay({ label = 'Saving…' }) {
-  return createPortal(
-    <div className="modal-overlay submit-loading-overlay" role="status" aria-live="polite">
-      <div className="submit-loading-card">
-        <Icon name="gear" size={48} className="submit-loading-gear" filled />
-        <p className="submit-loading-label">{label}</p>
-      </div>
-    </div>,
-    document.body
-  );
+function SubmitLoadingOverlay({ label = 'Loading...' }) {
+  return <LoadingOverlay label={label} />;
 }
 
-function ModuleLoader({ label = 'Loading module data' }) {
-  return (
-    <div className="module-loader" role="status" aria-live="polite">
-      <div className="module-loader-card">
-        <span className="module-loader-spinner" aria-hidden="true">
-          <svg viewBox="0 0 50 50" width="44" height="44">
-            <circle className="module-loader-track" cx="25" cy="25" r="20" fill="none" strokeWidth="5" />
-            <circle className="module-loader-arc" cx="25" cy="25" r="20" fill="none" strokeWidth="5" strokeLinecap="round" />
-          </svg>
-        </span>
-        <span className="module-loader-label">{label}<span className="module-loader-dots" /></span>
-      </div>
-
-      <div className="skeleton-table" aria-hidden="true">
-        <div className="skeleton-row skeleton-head">
-          {Array.from({ length: 5 }).map((_, i) => <span className="skeleton-cell" key={i} />)}
-        </div>
-        {Array.from({ length: 5 }).map((_, r) => (
-          <div className="skeleton-row" key={r} style={{ animationDelay: `${r * 0.08}s` }}>
-            {Array.from({ length: 5 }).map((_, c) => <span className="skeleton-cell" key={c} />)}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+function ModuleLoader({ label = 'Loading...' }) {
+  return <LoadingOverlay label={label} />;
 }
 
 function ReportPreview({ report }) {
@@ -6931,7 +6697,7 @@ function ReportPreview({ report }) {
     <div className={`report-document${isLandscape ? ' is-landscape' : ''}`}>
       <header className="report-document-header">
         <div className="report-brand">
-          <span className="report-brand-mark"><Icon name="gear" size={22} filled /></span>
+          <span className="report-brand-mark"><VMSLogo variant="blue" size={28} /></span>
           <span><strong>VMS</strong><small>Barangay Vehicle Management System</small></span>
         </div>
         <div className="report-document-heading"><span>OFFICIAL FLEET REPORT</span><h2>{report.report_type?.toUpperCase()}</h2></div>
@@ -8095,7 +7861,7 @@ function UserFormPage({ initialValues, isEditing, onBack, onSubmit, submitLabel,
   );
 }
 
-function FormPage({ description, onBack, fields, initialValues, onSubmit, submitLabel, contextVehicles, hubs, warnEndpoint, warnRender, reviewStep = false, wrapperClassName, formTitle = '', onDirty, showDomainPreview = false, categoryVehicleCount = null }) {
+function FormPage({ description, onBack, fields, initialValues, onSubmit, submitLabel, contextVehicles, hubs, warnEndpoint, warnRender, reviewStep = false, wrapperClassName, formTitle = '', onDirty, showDomainPreview = false, categoryVehicleCount = null, compactVehiclePreview = false }) {
   // Scoped to this exact route (new-X vs. editing record #N are different
   // paths) so a form's in-progress values survive clicking a "view" link
   // (e.g. the selected vehicle/custodian's name) and coming Back, instead of
@@ -8185,6 +7951,15 @@ function FormPage({ description, onBack, fields, initialValues, onSubmit, submit
         <div><dt>Status</dt><dd><StatusBadge value={vehicle.status} /></dd></div>
         <div><dt>Condition</dt><dd><StatusBadge value={vehicle.condition} /></dd></div>
       </dl>
+    </section>
+  ) : null;
+
+  const vehicleLocationCard = vehicle && !showDomainPreview ? (
+    <section className="veh-card form-context-map-inline">
+      <div className="veh-card-head"><Icon name="pin" size={16} /><h4>{vehicle.current_location ?? 'Location unknown'}</h4></div>
+      <div className="veh-map-wrap form-context-map-expanded">
+        <VehicleLocationMap lat={hub?.lat} lng={hub?.lng} label={vehicle.current_location} />
+      </div>
     </section>
   ) : null;
 
@@ -8278,12 +8053,13 @@ function FormPage({ description, onBack, fields, initialValues, onSubmit, submit
               vehicleInfoCard
             ) : (
               <section className="veh-card form-context-empty">
+                {compactVehiclePreview && <div className="veh-card-head"><Icon name="vehicle" size={16} /><h4>Vehicle preview</h4></div>}
                 <Icon name="vehicle" size={30} />
                 <p>Select a vehicle in the form and its photo, details, and location will show here.</p>
               </section>
             )}
 
-            {vehicle && !showDomainPreview && (
+            {vehicle && !showDomainPreview && !compactVehiclePreview && (
               <section className="veh-card">
                 <div className="veh-card-head"><Icon name="clipboard" size={16} /><h4>Entry Summary</h4></div>
                 <dl className="veh-kv">
@@ -8300,20 +8076,15 @@ function FormPage({ description, onBack, fields, initialValues, onSubmit, submit
               </section>
             )}
 
+            {compactVehiclePreview && vehicleLocationCard}
+
           </div>
           <div className="form-context-form-col">
             <div className={`form-grid-2col form-context-form${wrapperClassName ? ` ${wrapperClassName}` : ''}`}>{form}</div>
             {/* Stacked below the form fields, inside the same column, so it
                 fills the free space the form's shorter height leaves behind
                 instead of floating full-width beneath both columns. */}
-            {vehicle && !showDomainPreview && (
-              <section className="veh-card form-context-map-inline">
-                <div className="veh-card-head"><Icon name="pin" size={16} /><h4>{vehicle.current_location ?? 'Location unknown'}</h4></div>
-                <div className="veh-map-wrap form-context-map-expanded">
-                  <VehicleLocationMap lat={hub?.lat} lng={hub?.lng} label={vehicle.current_location} />
-                </div>
-              </section>
-            )}
+            {!compactVehiclePreview && vehicleLocationCard}
           </div>
         </div>
       ) : (
@@ -8617,15 +8388,18 @@ function scheduleFields(lookups, allHubs = [], isEdit = false, suggestOnly = fal
   // what, roughly when, and why.
   const keep = suggestOnly ? ['vehicle_id', 'maintenance_type', 'scheduled_date', 'notes'] : null;
   const all = [
-    { label: 'Vehicle', name: 'vehicle_id', options: vehicleOptions(lookups), required: true, type: 'select' },
-    { label: 'Maintenance Type', name: 'maintenance_type', options: lookups.maintenance_types, required: true, type: 'creatable-select', newItemLabel: 'maintenance type', catalogEndpoint: '/maintenance-types' },
-    { label: 'Scheduled Date', name: 'scheduled_date', required: true, type: 'date' },
-    { label: 'Scheduled Time', name: 'scheduled_time', type: 'time' },
+    { label: 'Vehicle', name: 'vehicle_id', options: vehicleOptions(lookups), required: true, type: 'select', group: '1. Vehicle & maintenance' },
+    { label: 'Maintenance Type', name: 'maintenance_type', options: lookups.maintenance_types, required: true, type: 'creatable-select', newItemLabel: 'maintenance type', catalogEndpoint: '/maintenance-types', group: '1. Vehicle & maintenance' },
+    { label: 'Scheduled Date', name: 'scheduled_date', required: true, type: 'date', group: '2. Date & recurrence' },
+    { label: 'Scheduled Time', name: 'scheduled_time', type: 'time', group: '2. Date & recurrence' },
     // Recurring PM: completing this schedule auto-creates the next at the chosen
     // interval. Left blank = one-time (the default "Select" option).
     {
       label: 'Repeat Every (optional)',
       name: 'recurrence_months',
+      group: '2. Date & recurrence',
+      fullWidth: true,
+      hint: 'Leave blank for a one-time schedule.',
       type: 'select-or-other',
       options: [
         { value: 1, label: 'Month' },
@@ -8642,18 +8416,14 @@ function scheduleFields(lookups, allHubs = [], isEdit = false, suggestOnly = fal
       otherMax: 60,
     },
     // A known hub, or "Other" for an outside repair shop not in that list.
-    { label: 'Service Location', name: 'service_location', type: 'select-or-other', options: hubOptions, otherLabel: 'Other / External Shop', otherPlaceholder: 'e.g. Toyota Service Center' },
-    // Full-width only on create: with Status hidden there, it's the trailing
-    // odd-one-out in the 2-column grid — spanning the full row reads as
-    // intentional instead of leaving an empty cell beside it. On edit, Status
-    // sits next to it instead, making the pair even again.
-    { label: 'Assigned To', name: 'assigned_to', options: options(lookups.maintenance_personnel, 'id', 'name'), type: 'select', fullWidth: !isEdit },
+    { label: 'Service Location', name: 'service_location', type: 'select-or-other', options: hubOptions, otherLabel: 'Other / External Shop', otherPlaceholder: 'e.g. Toyota Service Center', group: '3. Location & assignment' },
+    { label: 'Assigned To', name: 'assigned_to', options: options(lookups.maintenance_personnel, 'id', 'name'), type: 'select', group: '3. Location & assignment' },
     // Completed is deliberately never offered here — marking a schedule done
     // goes through the dedicated "Mark Done" action (creates the proof-of-work
     // record and, if recurring, the next occurrence); this field only ever
     // needs to cancel an existing one. Not shown at all when creating new.
-    ...(isEdit ? [{ label: 'Status', name: 'status', options: ['Scheduled', 'Cancelled'], type: 'select' }] : []),
-    { label: 'Notes', name: 'notes', type: 'textarea' },
+    ...(isEdit ? [{ label: 'Status', name: 'status', options: ['Scheduled', 'Cancelled'], type: 'select', fullWidth: true, group: '3. Location & assignment' }] : []),
+    { label: 'Notes', name: 'notes', type: 'textarea', placeholder: 'Add preparation, symptoms, or instructions for the mechanic.', group: '4. Notes' },
   ];
   return keep ? all.filter((f) => keep.includes(f.name)) : all;
 }
@@ -8964,6 +8734,8 @@ function ModuleStatCards({ totalLabel = 'Total', total, cards, counts, activeFil
 function vehicleColumns(user, onEdit, deleteRecord, restoreRecord, filterStatus, onViewTicket, onReadinessCheck, onDispatch) {
   const columns = [
     { key: 'id', label: 'ID', locked: true, className: 'cell-center', render: (row) => row.vehicle_id },
+    { key: 'type', label: 'Type', render: (row) => row.category?.category_name ?? 'Unassigned' },
+    { key: 'brand_model', label: 'Brand / Model', render: (row) => `${row.brand} ${row.model}` },
     {
       key: 'vehicle',
       label: 'Vehicle',
@@ -8976,8 +8748,6 @@ function vehicleColumns(user, onEdit, deleteRecord, restoreRecord, filterStatus,
       ),
     },
     { key: 'plate', label: 'Plate Number', className: 'cell-center', render: (row) => row.plate_number },
-    { key: 'type', label: 'Type', render: (row) => row.category?.category_name ?? 'Unassigned' },
-    { key: 'brand_model', label: 'Brand / Model', render: (row) => `${row.brand} ${row.model}` },
     { key: 'capacity', label: 'Capacity', className: 'cell-center', render: (row) => row.capacity },
     { key: 'location', label: 'Location', render: (row) => row.current_location },
     {
@@ -9719,7 +9489,7 @@ function TicketFilterPanel({
         <div className="issue-filter-status-grid" role="group" aria-label="Ticket status">
           {statuses.map((status) => {
             const card = TICKET_STAT_CARDS.find((item) => item.key === status);
-            return <label key={status} className="issue-filter-status-chip" style={{ background: card?.bg ?? '#ede9fe', color: card?.color ?? '#6d28d9' }}>
+            return <label key={status} className="issue-filter-status-chip" data-status={status} style={{ background: card?.bg ?? '#ede9fe', color: card?.color ?? '#6d28d9' }}>
               <input type="checkbox" checked={!draft.status.length || draft.status.includes(status)} onChange={() => toggleStatus(status)} />
               <span>{card?.label ?? status}</span>
             </label>;
@@ -9914,11 +9684,6 @@ function issueColumns(role, onEdit, onCreateTicketFromIssue, setUserInfoTarget, 
             <button className="btn-view-action icon-btn" onClick={() => onViewTicket({ ticket_id: row.maintenance_ticket.ticket_id })} type="button" title={`View Ticket #${row.maintenance_ticket.ticket_id}`} aria-label={`View Ticket #${row.maintenance_ticket.ticket_id}`}><Icon name="eye" size={14} /></button>
           ) : (
             <button className="btn-view-action icon-btn" onClick={() => onView(row)} type="button" title="View" aria-label="View"><Icon name="eye" size={14} /></button>
-          )}
-          {/* A Custodian turns a flagged concern into a ticket proposal right
-              from the row — only while the issue can still take one. */}
-          {canDo(user, 'ticket.propose') && onCreateTicketFromIssue && ['Pending', 'Under Review'].includes(row.status) && !row.maintenance_ticket && (
-            <button className="btn-confirm-action icon-btn" onClick={() => onCreateTicketFromIssue(row)} type="button" title="Propose Ticket" aria-label="Propose Ticket"><Icon name="ticket" size={14} /></button>
           )}
           {row.status === 'Pending' && (
             <>
@@ -10134,6 +9899,10 @@ function MaintenanceRecordDetail({ record, onConfirm, onReopen, onDecisionClose,
   return (
     <ModulePanel description={`Maintenance #${record.maintenance_id}`}>
       <div className="maintenance-record-detail">
+        <header className="maintenance-report-heading">
+          <div><span className="maintenance-detail-label">Service record #{record.maintenance_id}</span><h2>{record.maintenance_type || 'Maintenance record'}</h2><p>Repair details, completion evidence, and verification.</p></div>
+          <StatusBadge value={record.progress_status} />
+        </header>
         <div className="maintenance-record-hero">
           <VehicleCell vehicle={record.vehicle} />
           <span className="muted">{record.maintenance_type}</span>
@@ -10159,6 +9928,7 @@ function MaintenanceRecordDetail({ record, onConfirm, onReopen, onDecisionClose,
 
         <div className="maintenance-record-layout">
           <div className="maintenance-record-main">
+        <h3 className="maintenance-section-title">Work progress</h3>
         {/* Progress trail — where this record actually sits, not just a
             status word. Filled/checked nodes are stages already passed. */}
         <div className="maintenance-progress">
@@ -10181,6 +9951,7 @@ function MaintenanceRecordDetail({ record, onConfirm, onReopen, onDecisionClose,
           ))}
         </div>
 
+        <h3 className="maintenance-section-title">Service summary</h3>
         <div className="maintenance-detail-grid">
           <div>
             <span className="maintenance-detail-label">Problem / Reason</span>
@@ -10210,17 +9981,16 @@ function MaintenanceRecordDetail({ record, onConfirm, onReopen, onDecisionClose,
           </div>
 
           <aside className="maintenance-record-sidebar" aria-label="Verification and completion details">
+        <h3 className="maintenance-section-title">Completion & verification</h3>
         {/* Proof shown inline — the whole point of this view over the plain
             edit form is not having to click away just to see it. */}
         {record.receipt_url && (
-          <div>
-            <span className="muted" style={{ fontSize: '0.74rem', display: 'block', marginBottom: 6 }}>Proof of Completion</span>
-            <a href={resolvePhotoUrl(record.receipt_url)} target="_blank" rel="noopener noreferrer">
-              <img src={resolvePhotoUrl(record.receipt_url)} alt="Proof of completion" style={{ maxWidth: 360, maxHeight: 280, borderRadius: 8, border: '1px solid #e2e8f0', display: 'block' }} />
-            </a>
-          </div>
+          <a className="maintenance-proof-file" href={resolvePhotoUrl(record.receipt_url)} target="_blank" rel="noopener noreferrer">
+            <Icon name="clipboard" size={22} /><span><strong>Proof of completion</strong><small>Open attached receipt or repair evidence</small></span><Icon name="link" size={16} />
+          </a>
         )}
 
+        {!record.verification_result && <p className="muted" style={{ margin: 0, fontSize: '0.8rem' }}>No verification result recorded.</p>}
         {record.verification_result && (
           <div style={{ padding: '10px 12px', borderRadius: 8, maxWidth: 480, background: record.verification_result === 'Passed' ? '#ecfdf5' : '#fef2f2', border: `1px solid ${record.verification_result === 'Passed' ? '#a7f3d0' : '#fecaca'}` }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.85rem', fontWeight: 700, color: record.verification_result === 'Passed' ? '#065f46' : '#991b1b' }}>
@@ -10899,91 +10669,6 @@ function logColumns(vehicles, onViewVehicle, onViewTicket) {
 // the table shows) — a raw chronological dump, and two rollups (by user, by
 // module) that are actually useful for "who's been doing what" questions a
 // raw log dump doesn't answer directly.
-function GenerateReportButton({ rows }) {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const handleOutsideClick = (e) => {
-      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handleOutsideClick);
-    return () => document.removeEventListener('mousedown', handleOutsideClick);
-  }, [open]);
-
-  const runReport = (type) => {
-    setOpen(false);
-    const stamp = new Date().toISOString().slice(0, 10);
-
-    if (type === 'timeline') {
-      exportRowsToCsv(`activity-timeline-${stamp}.csv`, [
-        { label: 'Date and Time', value: (r) => formatLogDateTime(r.created_at) },
-        { label: 'User', value: (r) => r.user?.name ?? 'System' },
-        { label: 'Role', value: (r) => r.role ?? '-' },
-        { label: 'Module', value: (r) => r.module ?? '-' },
-        { label: 'Action', value: (r) => r.action },
-        { label: 'Details', value: (r) => r.details ?? '' },
-      ], rows);
-      return;
-    }
-
-    if (type === 'user') {
-      const byUser = new Map();
-      rows.forEach((r) => {
-        const key = r.user?.name ?? 'System';
-        const entry = byUser.get(key) ?? { user: key, role: r.role ?? '-', total: 0, last: r.created_at };
-        entry.total += 1;
-        if (r.created_at && (!entry.last || new Date(r.created_at) > new Date(entry.last))) entry.last = r.created_at;
-        byUser.set(key, entry);
-      });
-      exportRowsToCsv(`activity-by-user-${stamp}.csv`, [
-        { label: 'User', value: (r) => r.user },
-        { label: 'Role', value: (r) => r.role },
-        { label: 'Total Actions', value: (r) => r.total },
-        { label: 'Last Active', value: (r) => formatLogDateTime(r.last) },
-      ], [...byUser.values()].sort((a, b) => b.total - a.total));
-      return;
-    }
-
-    if (type === 'module') {
-      const byModule = new Map();
-      rows.forEach((r) => {
-        const key = r.module ?? 'Other';
-        byModule.set(key, (byModule.get(key) ?? 0) + 1);
-      });
-      exportRowsToCsv(`activity-by-module-${stamp}.csv`, [
-        { label: 'Module', value: (r) => r.module },
-        { label: 'Total Actions', value: (r) => r.total },
-      ], [...byModule.entries()].map(([module, total]) => ({ module, total })).sort((a, b) => b.total - a.total));
-    }
-  };
-
-  return (
-    <div className="column-chooser generate-report" ref={containerRef}>
-      <button type="button" className={`primary-button generate-report-btn${open ? ' is-active' : ''}`} onClick={() => setOpen((v) => !v)}>
-        Generate Report <Icon name="chevronDown" size={13} />
-      </button>
-      {open && (
-        <div className="column-chooser-panel generate-report-panel" role="menu">
-          <button type="button" className="generate-report-option" onClick={() => runReport('timeline')}>
-            <strong>Timeline Report</strong>
-            <span>Every action, in order, exactly as shown below.</span>
-          </button>
-          <button type="button" className="generate-report-option" onClick={() => runReport('user')}>
-            <strong>User Report</strong>
-            <span>Action counts per user, most active first.</span>
-          </button>
-          <button type="button" className="generate-report-option" onClick={() => runReport('module')}>
-            <strong>Module Report</strong>
-            <span>Action counts per module, busiest first.</span>
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // Same rows as the List View table, rendered as a connected vertical
 // timeline instead — its own pagination via the same usePagination hook, so
 // switching tabs doesn't lose your place in a 14,000-row activity log.
@@ -12722,7 +12407,7 @@ function TwoColumnSubIssueEditor({ items, onChange, maintenanceTypeOptions, mech
         </label>
         {mechanicOptions && (
           <label style={{ marginTop: 10 }}>
-            <span>Maintenance Personnel <span className="muted" style={{ fontWeight: 400 }}>(optional — Admin can change this)</span></span>
+            <span>Maintenance Personnel</span>
             <select
               value={draft.suggested_mechanic_id}
               onChange={(e) => setDraft((d) => ({ ...d, suggested_mechanic_id: e.target.value }))}
@@ -12770,8 +12455,7 @@ function TwoColumnSubIssueEditor({ items, onChange, maintenanceTypeOptions, mech
 // TICKET DETAIL PANEL — shown when admin clicks a ticket row
 // =========================================================================
 
-function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEditSubIssue, onDeleteSubIssue, onAssignTicketMechanic, onReassignCustodian, onReopenDone, onLogRepairs, onSubmitForVerification, onVerifyTicket, onCancel, onUncancel, onDelete, onRequestConfirmation, onApproveCannibalization, onRejectCannibalization, onApproveProposal, onDeclineProposal, onUndeclineProposal, onClose, asPage = false }) {
-  const [subDraft, setSubDraft] = useState(null); // { id|null, title, maintenance_type }
+function TicketDetailPanel({ user, userId, ticket, lookups, onAssignTicketMechanic, onReassignCustodian, onReopenDone, onLogRepairs, onSubmitForVerification, onVerifyTicket, onCancel, onUncancel, onDelete, onRequestConfirmation, onApproveCannibalization, onRejectCannibalization, onApproveProposal, onDeclineProposal, onUndeclineProposal, onClose, asPage = false }) {
   // Cannibalization approval — tracks which sub-issue's reject form is
   // open; Approve has no form of its own (it needs no input beyond the
   // click itself), so it doesn't need a tracked id.
@@ -12805,13 +12489,9 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
     const ids = prev ?? defaultExpandedSubs;
     return ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
   });
-  const isAdminUser = hasRole(user, 'Admin');
   const isAssignedMechanic = ticket.assigned_mechanic_id != null && String(ticket.assigned_mechanic_id) === String(userId);
   const isAssignedCustodian = ticket.assigned_custodian_id != null && String(ticket.assigned_custodian_id) === String(userId);
   const resolvedCount = progress.done + progress.deferred;
-  const inRepairCount = subIssues.filter((s) => s.status === 'Under Repair').length;
-  const loggedCount = subIssues.filter((s) => s.status === 'For Inspection').length;
-  const pendingApprovalCount = subIssues.filter((s) => s.status === 'Pending Approval').length;
   // Every sub-issue has to have its repair logged (For Inspection) before
   // the mechanic can hand the whole ticket to the Custodian — a cannibalized
   // line item still sitting at Pending Approval naturally blocks this,
@@ -12832,33 +12512,9 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
     return { label: 'Returned — record service report', hint: 'Vehicle returned; service report next', detail: 'The vehicle is back. Record the service report so the Custodian can verify it.' };
   })();
   const canHandleExternal = isExternalTicket && ticket.status === 'Active' && canDo(user, 'external.handle');
-  const ticketCost = subIssues.reduce((sum, s) => sum + (Number(s.maintenance_cost) || 0), 0);
   const resolvedPercent = ticket.status === 'Closed'
     ? 100
     : subIssues.length > 0 ? Math.round((resolvedCount / subIssues.length) * 100) : 0;
-  const nextSignal = (() => {
-    if (ticket.status === 'Cancelled') return { tone: 'alert', label: 'Ticket cancelled', detail: 'Restore it only if work needs to resume.' };
-    if (ticket.status === 'Closed') return { tone: 'ok', label: 'Closed', detail: 'All recorded work is complete.' };
-    if (ticket.status === 'Declined') return { tone: 'alert', label: 'Declined', detail: 'Undecline it first — then you can approve and assign it.' };
-    if (ticket.status === 'Pending Approval') return { tone: 'warn', label: 'Review proposal', detail: 'A Custodian proposed this ticket — review and approve or decline it below.' };
-    if (ticket.status === 'For Verification') return isAssignedCustodian
-      ? { tone: 'warn', label: 'Verify repair', detail: 'The mechanic says this is done — confirm it before the ticket closes.' }
-      : { tone: 'active', label: 'Awaiting verification', detail: `${ticket.assigned_custodian?.name ?? 'The assigned Custodian'} needs to verify this repair.` };
-    if (isExternalTicket && ticket.status === 'Active') return { tone: 'active', label: extStage.label, detail: extStage.detail };
-    if (canSubmitForVerification) return { tone: 'warn', label: 'Submit for verification', detail: 'Every sub-issue is logged — submit the ticket for the Custodian to verify.' };
-    if (isAdminUser && pendingApprovalCount > 0) return { tone: 'warn', label: 'Approve cannibalized repair', detail: `${pendingApprovalCount} repair${pendingApprovalCount === 1 ? '' : 's'} using a part from another vehicle ${pendingApprovalCount === 1 ? 'needs' : 'need'} your approval.` };
-    if (pendingApprovalCount > 0) return { tone: 'active', label: 'Awaiting Admin approval', detail: 'A cannibalized repair is waiting for Admin approval before it can be logged as done.' };
-    if (!isAdminUser && isAssignedMechanic && inRepairCount > 0) return { tone: 'warn', label: 'Log your repairs', detail: `${inRepairCount} sub-issue${inRepairCount === 1 ? '' : 's'} still ${inRepairCount === 1 ? 'needs' : 'need'} a repair log.` };
-    if (inRepairCount > 0) return { tone: 'active', label: 'Repair in progress', detail: `${ticket.assigned_mechanic?.name ?? 'The assigned mechanic'} is still working on ${inRepairCount} sub-issue${inRepairCount === 1 ? '' : 's'}.` };
-    return { tone: 'active', label: 'Work in motion', detail: 'Follow the active handoff shown in the repair board.' };
-  })();
-  const processStats = [
-    { icon: 'list', label: 'Sub-issues', value: subIssues.length },
-    { icon: 'wrench', label: 'In repair', value: inRepairCount },
-    { icon: 'search', label: 'Logged', value: loggedCount },
-    { icon: 'clipboard', label: 'Cost', value: ticketCost ? `PHP ${ticketCost.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : 'PHP 0.00' },
-  ];
-
   // "How long has this been sitting?" — the aging signal. Flagged past 30 days.
   const daysOpen = ticket.days_open;
   const isAging = ticket.status !== 'Closed' && ticket.status !== 'Cancelled' && typeof daysOpen === 'number' && daysOpen >= 30;
@@ -12885,7 +12541,7 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
 
   const panel = (
       <div className={`ticket-detail-panel${asPage ? ' is-page' : ''}`} onClick={asPage ? undefined : (e) => e.stopPropagation()}>
-        <section className={`ticket-process-hero is-${nextSignal.tone}`}>
+        <section className="ticket-process-hero ticket-process-hero--simple">
           <div className="ticket-process-meter" style={{ '--ticket-progress': `${resolvedPercent}%` }}>
             <div className="ticket-process-meter-core">
               <span>Resolved</span>
@@ -12926,23 +12582,8 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
             )}
           </div>
 
-          <div className="ticket-process-next-card">
-            {asPage ? null : (
-              <button className="icon-btn ticket-process-close" onClick={onClose} type="button" title="Close" aria-label="Close"><Icon name="close" size={18} /></button>
-            )}
-            <span className="ticket-process-next-label">Next best action</span>
-            <strong>{nextSignal.label}</strong>
-            <p>{nextSignal.detail}</p>
-            <div className="ticket-process-stat-grid">
-              {processStats.map((stat) => (
-                <div key={stat.label} className="ticket-process-stat">
-                  <span className="ticket-process-stat-icon"><Icon name={stat.icon} size={14} /></span>
-                  <strong className="ticket-process-stat-value">{stat.value}</strong>
-                  <span className="ticket-process-stat-label">{stat.label}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+          {!asPage && <button className="icon-btn ticket-process-close" onClick={onClose} type="button" title="Close" aria-label="Close"><Icon name="close" size={18} /></button>}
+
         </section>
 
         {ticket.status === 'Cancelled' ? (
@@ -12993,11 +12634,11 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
                   <strong>{ticket.vehicle?.vehicle_name}</strong>
                   <span>{ticket.vehicle?.plate_number} &middot; {ticket.vehicle?.category?.category_name ?? 'Unclassified'}</span>
                   <span className="muted">{[ticket.vehicle?.brand, ticket.vehicle?.model].filter(Boolean).join(' ') || '—'} &middot; {ticket.vehicle?.current_location ?? 'No location on file'}</span>
-                  <div className="ticket-preview-badges">
+                  <div className="ticket-preview-badges ticket-overview-status-text">
                     <StatusBadge value={ticket.vehicle?.status} />
                     <StatusBadge value={ticket.vehicle?.condition} />
                   </div>
-                  <div className="ticket-overview-progress" aria-label="Current repair progress">
+                  <div className="ticket-overview-progress ticket-overview-status-text" aria-label="Current repair progress">
                     <span>Repair progress</span>
                     <TicketStatusBadge value={ticket.status} />
                     <TicketStageBadge ticket={ticket} variant="pill" />
@@ -13018,12 +12659,6 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
                     <span>Assigned To</span>
                     <UserAvatarName user={ticket.assigned_custodian} />
                   </div>
-                  {ticket.inspection_result && (
-                    <div>
-                      <span>Result</span>
-                      <TicketStatusBadge value={ticket.inspection_result} />
-                    </div>
-                  )}
                 </div>
                 {ticket.inspection_notes && <p className="muted" style={{ margin: 0, fontSize: '0.82rem' }}>{ticket.inspection_notes}</p>}
 
@@ -13178,51 +12813,6 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
                 <p className="muted">No sub-issues — inspection found nothing to repair.</p>
               )}
 
-              {/* Adding a brand-new sub-issue to an already-Active ticket is
-                  deliberately not offered — every sub-issue is supposed to be
-                  settled at Admin approval, before repair starts. This inline
-                  form still renders for editing an existing sub-issue (the
-                  pencil icon below sets subDraft with its id), since that's
-                  unchanged — only the "Add Sub-issue" entry point is gone. */}
-              {subDraft && (
-                <div className="ticket-inline-form" style={{ marginBottom: 10, padding: '10px 12px' }}>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <input
-                      type="text"
-                      autoFocus
-                      placeholder="What else is wrong?"
-                      value={subDraft.title}
-                      onChange={(e) => setSubDraft({ ...subDraft, title: e.target.value })}
-                      style={{ flex: '2 1 240px' }}
-                    />
-                    <input
-                      type="text"
-                      list="subissue-maintenance-types"
-                      placeholder="Maintenance type (optional)"
-                      value={subDraft.maintenance_type}
-                      onChange={(e) => setSubDraft({ ...subDraft, maintenance_type: e.target.value })}
-                      style={{ flex: '1 1 180px' }}
-                    />
-                    <datalist id="subissue-maintenance-types">
-                      {(lookups.maintenance_types ?? []).map((t) => <option key={t.name ?? t} value={t.name ?? t} />)}
-                    </datalist>
-                    <button
-                      type="button"
-                      className="primary-button"
-                      disabled={!subDraft.title.trim()}
-                      onClick={async () => {
-                        const payload = { title: subDraft.title.trim(), maintenance_type: subDraft.maintenance_type.trim() || null };
-                        const ok = subDraft.id ? await onEditSubIssue(ticket, subDraft.id, payload) : await onAddSubIssue(ticket, payload);
-                        if (ok !== false) setSubDraft(null);
-                      }}
-                    >
-                      {subDraft.id ? 'Save' : 'Add'}
-                    </button>
-                    <button type="button" className="ghost-button" onClick={() => setSubDraft(null)}>Cancel</button>
-                  </div>
-                </div>
-              )}
-
               <div className="ticket-subissue-scroll">
               {subIssues.map((si, index) => {
                 const stageBanner = {
@@ -13248,14 +12838,7 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
                     <span className="subissue-index">{index + 1}</span>
                     <strong className="subissue-title">{si.title}</strong>
                     <TicketStatusBadge value={si.status} />
-                    {onEditSubIssue && ticket.status === 'Active' && ['Open', 'Under Repair'].includes(si.status) && canDo(user, 'subissue.manage') && (hasRole(user, 'Admin') || String(ticket.assigned_custodian_id) === String(userId)) && (
-                      <span className="subissue-card-head-actions">
-                        <button type="button" className="btn-edit-action icon-btn" title="Edit sub-issue" aria-label="Edit sub-issue" onClick={() => setSubDraft({ id: si.sub_issue_id, title: si.title, maintenance_type: si.maintenance_type ?? '' })}><Icon name="edit" size={13} /></button>
-                        {subIssues.length > 1 && (
-                          <button type="button" className="btn-delete-action icon-btn" title="Remove sub-issue" aria-label="Remove sub-issue" onClick={() => onDeleteSubIssue(ticket, si)}><Icon name="trash" size={13} /></button>
-                        )}
-                      </span>
-                    )}                  </div>
+                  </div>
 
                   <div className="subissue-body-grid">
                   <div className="subissue-body-main">
@@ -13329,6 +12912,7 @@ function TicketDetailPanel({ user, userId, ticket, lookups, onAddSubIssue, onEdi
                       <PartsTags value={si.parts_used} />
                     </div>
                   )}
+                  {(si.attachment_files ?? []).map((file, i) => <a key={file.url ?? i} className="subissue-attachment-link" href={resolvePhotoUrl(file.url)} target="_blank" rel="noreferrer"><Icon name="clipboard" size={13} />{file.name || 'Repair attachment'}</a>)}
                   {si.attachment_url && (
                     <a className="subissue-attachment-link" href={resolvePhotoUrl(si.attachment_url)} target="_blank" rel="noreferrer">
                       <Icon name="clipboard" size={13} /> View attached photo/document
@@ -13897,15 +13481,12 @@ function NewTicketPage({ onBack, ticketLookups, prefilledTicketData, onCreateTic
                     type="button"
                     role="radio"
                     aria-checked={checked}
-                    className={`entry-mode-btn ticket-method-card ${checked ? 'is-selected' : ''}`}
+                    className={`entry-mode-btn entry-mode-btn--${opt.value} ticket-method-tab ${checked ? 'primary-button' : 'ghost-button'}`}
                     onClick={() => selectEntryMode(opt.value)}
                   >
-                    <span className="ticket-method-icon"><Icon name="wrench" size={17} /></span>
-                    <span className="ticket-method-copy">
-                      <strong>{opt.label}</strong>
-                      <small>{opt.value === 'external' ? 'Send the vehicle to an outside service provider.' : 'Assigned maintenance personnel will handle the repair.'}</small>
-                    </span>
-                    <span className="ticket-method-radio" aria-hidden="true" />
+                    <Icon name="wrench" size={18} />
+                    <span>{opt.label}</span>
+                    {checked && <Icon name="checkCircle" size={18} />}
                   </button>
                 );
               })}
@@ -14332,12 +13913,12 @@ function ProposeTicketPage({ onBack, ticketLookups, onProposeTicket, onDirty, pr
                     type="button"
                     role="radio"
                     aria-checked={checked}
-                    className={`entry-mode-btn ticket-method-card ${checked ? 'is-selected' : ''}`}
+                    className={`entry-mode-btn entry-mode-btn--${opt.value} ticket-method-tab ${checked ? 'primary-button' : 'ghost-button'}`}
                     onClick={() => selectEntryMode(opt.value)}
                   >
-                    <span className="ticket-method-icon"><Icon name="wrench" size={17} /></span>
-                    <span className="ticket-method-copy"><strong>{opt.label}</strong><small>{opt.value === 'external' ? 'Send the vehicle to an outside service provider.' : 'Assigned maintenance personnel will handle the repair.'}</small></span>
-                    <span className="ticket-method-radio" aria-hidden="true" />
+                    <Icon name="wrench" size={18} />
+                    <span>{opt.label}</span>
+                    {checked && <Icon name="checkCircle" size={18} />}
                   </button>
                 );
               })}
@@ -14345,7 +13926,9 @@ function ProposeTicketPage({ onBack, ticketLookups, onProposeTicket, onDirty, pr
             <p className="muted ticket-method-hint">
               {entryMode == null
                 ? 'Pick how this repair will be done.'
-                : 'Once an Admin approves and assigns a mechanic, it goes straight to repair.'}
+                : isExternal
+                  ? 'Admin reviews the proposal before shop dispatch. The Custodian verifies the completed work.'
+                  : 'Once an Admin approves and assigns a mechanic, it goes straight to repair.'}
             </p>
           </div>
         </section>
@@ -14418,6 +14001,7 @@ function ProposeTicketPage({ onBack, ticketLookups, onProposeTicket, onDirty, pr
           )}
         </section>
 
+        <div className="ticket-work-column">
         <section className="veh-card veh-card-form ticket-issue-section">
           <div className="veh-card-head"><Icon name="alert" size={16} /><h4>3. Describe the issue</h4></div>
           <div className="ticket-issue-fields">
@@ -14517,6 +14101,8 @@ function ProposeTicketPage({ onBack, ticketLookups, onProposeTicket, onDirty, pr
           </div>
         </section>
         )}
+
+        </div>
 
         <div className="form-actions ticket-create-actions">
           <button className="ghost-button" onClick={() => { clearProposeDraft(); onBack(); }} type="button" disabled={submitting}>Cancel</button>
@@ -16536,7 +16122,6 @@ function CannibalizationManagement({ ticket, vehicleOptions, onChanged, notify }
     <section className="lr-group cm-section" aria-label="Cannibalization management">
       <div className="cm-head">
         <h4 className="lr-section-label" style={{ margin: 0 }}>Cannibalization Management</h4>
-        <span className="cm-badge">Cannibalized Repair</span>
       </div>
       <p className="cm-desc">This repair uses parts recovered from a donor vehicle. Parts and materials you buy are listed separately, and donor parts never add to the repair cost.</p>
 
@@ -16545,7 +16130,6 @@ function CannibalizationManagement({ ticket, vehicleOptions, onChanged, notify }
         <div><dt>Plate</dt><dd>{donor?.plate_number ?? donorFallback?.plate_number ?? '—'}</dd></div>
         <div><dt>Type</dt><dd>{donor?.category?.category_name ?? '—'}</dd></div>
         <div><dt>Status</dt><dd>{donor ? <StatusBadge value={donor.status} /> : '—'}</dd></div>
-        <div><dt>Condition</dt><dd>{donor ? <StatusBadge value={donor.condition} /> : '—'}</dd></div>
       </div>
       <p className="cm-note"><Icon name="info" size={13} /> Adding or editing parts changes nothing on the donor. When you submit this repair, one issue report listing these parts is filed on the donor vehicle and it is flagged for inspection.</p>
 
@@ -16557,7 +16141,6 @@ function CannibalizationManagement({ ticket, vehicleOptions, onChanged, notify }
       {parts.length === 0 ? (
         <div className="cm-empty">
           <p>No donor parts recorded yet.</p>
-          {editable && <button type="button" className="btn-sm primary-button" onClick={() => setModal({ mode: 'add' })}><Icon name="plus" size={13} /> Add Part</button>}
         </div>
       ) : (
         <div className="cm-table-wrap">
@@ -16642,8 +16225,8 @@ function DonorVehiclePicker({ ticket, vehicleOptions, onChanged, notify }) {
 
 function LogRepairsPage({ ticket, vehicleOptions = [], onBack, onSubmit, onDirty, onExternalSend, onExternalReturn, onDonorChanged, notify }) {
   const [repairLogs, setRepairLogs] = useState('');
-  const [parts, setParts] = useState([{ name: '', cost: '' }]);
-  const [attachment, setAttachment] = useState(null);
+  const [parts, setParts] = useState([]);
+  const [attachments, setAttachments] = useState([]);
   const [repairStartedAt, setRepairStartedAt] = useState('');
   const [repairCompletedAt, setRepairCompletedAt] = useState('');
   // Pre-filled from whatever was chosen at ticket creation (if this was a
@@ -16670,8 +16253,8 @@ function LogRepairsPage({ ticket, vehicleOptions = [], onBack, onSubmit, onDirty
   }
 
   const updatePart = (index, field, value) => { setParts((rows) => rows.map((row, i) => (i === index ? { ...row, [field]: value } : row))); onDirty?.(); };
-  const addPart = () => setParts((rows) => [...rows, { name: '', cost: '' }]);
-  const removePart = (index) => setParts((rows) => rows.filter((_, i) => i !== index));
+  const addPart = () => { setParts((rows) => [...rows, { name: '', cost: '' }]); onDirty?.(); };
+  const removePart = (index) => { setParts((rows) => rows.filter((_, i) => i !== index)); onDirty?.(); };
 
   // Live-running total instead of a manual "Generate" click — a click-based
   // total would go stale the moment another row is added or edited after
@@ -16693,8 +16276,8 @@ function LogRepairsPage({ ticket, vehicleOptions = [], onBack, onSubmit, onDirty
     onSubmit(ticket, {
       repair_logs: repairLogs,
       parts_used: namedParts.map((p) => p.name.trim()).join(', ') || undefined,
-      photo: attachment || undefined,
-      maintenance_cost: totalCost > 0 ? totalCost : undefined,
+      photos: attachments.length ? attachments : undefined,
+      maintenance_cost: parts.some((part) => part.cost !== '') ? totalCost : undefined,
       repair_started_at: repairStartedAt || undefined,
       repair_completed_at: repairCompletedAt || undefined,
       repair_type: repairType || undefined,
@@ -16710,7 +16293,6 @@ function LogRepairsPage({ ticket, vehicleOptions = [], onBack, onSubmit, onDirty
   const idBase = `lr-${ticket.sub_issue_id ?? ticket.ticket_id}`;
   const workDescription = ticket.work_order_notes ?? ticket.ticket_description;
   const namedPartCount = parts.filter((p) => p.name.trim()).length;
-  const formatFileSize = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`);
   const dimWhileAtShop = { opacity: awaitingShopReturn ? 0.5 : 1 };
 
   // One workspace instead of a stack of cards: a compact header (vehicle /
@@ -16904,43 +16486,19 @@ function LogRepairsPage({ ticket, vehicleOptions = [], onBack, onSubmit, onDirty
             <p className="lr-note">Evidence, parts and dates apply once the vehicle is back from the shop — mark it Returned above when it comes in.</p>
           )}
 
-          {/* Compact uploader — a button, not a giant drop rectangle. Same
-              single-file `attachment` state and accept list as before. */}
-          <section className="lr-group" style={dimWhileAtShop} aria-labelledby={`${idBase}-ev`}>
-            <h4 className="lr-section-label" id={`${idBase}-ev`}>Repair Evidence</h4>
-            {attachment ? (
-              <div className="lr-file-row">
-                {attachment.type.startsWith('image/') ? (
-                  <img src={URL.createObjectURL(attachment)} alt="" className="lr-file-thumb" />
-                ) : (
-                  <span className="lr-file-thumb lr-file-thumb-icon"><Icon name="archive" size={15} /></span>
-                )}
-                <span className="lr-file-name">{attachment.name}</span>
-                <span className="lr-hint">{formatFileSize(attachment.size)}</span>
-                <button type="button" className="lr-icon-btn" onClick={() => setAttachment(null)} title="Remove attachment" aria-label={`Remove ${attachment.name}`}>
-                  <Icon name="close" size={13} />
-                </button>
-              </div>
-            ) : (
-              <div className="lr-upload-line">
-                <label className="lr-upload-btn">
-                  <Icon name="plus" size={14} /> Add Photo / Document
-                  <input type="file" className="lr-file-input" accept="image/*,.pdf,.doc,.docx" onChange={(e) => { setAttachment(e.target.files[0] ?? null); onDirty?.(); }} />
-                </label>
-                <span className="lr-hint">JPG, PNG, PDF, or DOC · up to 8 MB</span>
-              </div>
-            )}
-          </section>
+
         </div>
 
-        <aside className="lr-side" aria-label="Repair record and submission">
+        <aside className="lr-side-column" aria-label="Repair record and submission">
+          <div className="lr-side">
           {/* Part name takes the row, cost is a fixed narrow column — no
               more fields pinned to opposite edges of the page. Same
               Part Name + Cost model the backend stores (a joined string +
               one total), so no quantity/unit-cost fields are invented. */}
           <section className="lr-side-group" style={dimWhileAtShop} aria-labelledby={`${idBase}-parts`}>
-            <h4 className="lr-section-label" id={`${idBase}-parts`}>Parts &amp; Materials</h4>
-            <div className="lr-parts" role="table" aria-labelledby={`${idBase}-parts`}>
+            <h4 className="lr-section-label" id={`${idBase}-parts`}>Parts &amp; Materials <span className="lr-hint">(optional)</span></h4>
+            {!parts.length && <p className="lr-hint">No parts or costs to record? Leave this section empty.</p>}
+            {!!parts.length && <div className="lr-parts" role="table" aria-labelledby={`${idBase}-parts`}>
               <div className="lr-parts-head" role="row">
                 <span role="columnheader">Part / Material</span>
                 <span role="columnheader">Cost (₱)</span>
@@ -16954,7 +16512,6 @@ function LogRepairsPage({ ticket, vehicleOptions = [], onBack, onSubmit, onDirty
                     type="button"
                     className="lr-icon-btn"
                     onClick={() => removePart(index)}
-                    disabled={parts.length === 1}
                     title="Remove part"
                     aria-label={`Remove part ${index + 1}`}
                   >
@@ -16962,7 +16519,7 @@ function LogRepairsPage({ ticket, vehicleOptions = [], onBack, onSubmit, onDirty
                   </button>
                 </div>
               ))}
-            </div>
+            </div>}
             <button type="button" className="lr-link-btn" onClick={addPart}><Icon name="plus" size={13} /> Add Part</button>
             <div className="lr-total">
               <span>Total Repair Cost</span>
@@ -16986,11 +16543,13 @@ function LogRepairsPage({ ticket, vehicleOptions = [], onBack, onSubmit, onDirty
 
           <div className="lr-side-actions">
             <p className="lr-hint">
-              Recorded under Ticket #{ticket.ticket_id} · {namedPartCount} part{namedPartCount === 1 ? '' : 's'} · {attachment ? '1 file attached' : 'no evidence attached'}
+              Recorded under Ticket #{ticket.ticket_id} · {namedPartCount} part{namedPartCount === 1 ? '' : 's'} · {attachments.length ? `${attachments.length} file${attachments.length === 1 ? '' : 's'} attached` : 'no evidence attached'}
             </p>
             <button className="primary-button lr-submit" type="submit">Submit Repair Log</button>
             <button className="ghost-button lr-cancel" onClick={onBack} type="button">Cancel</button>
           </div>
+          </div>
+          <RepairFileCabinet files={attachments} savedFiles={[...(ticket.attachment_files ?? []).map((file) => ({ ...file, url: resolvePhotoUrl(file.url) })), ...(ticket.attachment_url ? [{ url: resolvePhotoUrl(ticket.attachment_url), name: 'Previous repair attachment' }] : [])]} onChange={(files) => { setAttachments(files); onDirty?.(); }} onError={(text) => notify?.({ type: 'error', text })} />
         </aside>
       </form>
     </ModulePanel>
