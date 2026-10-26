@@ -30,11 +30,6 @@ function ChartTooltipCard({ rows }) {
   );
 }
 
-function pieTooltip({ active, payload }) {
-  if (!active || !payload?.length) return null;
-  const point = payload[0];
-  return <ChartTooltipCard rows={[{ label: point.name, value: point.value, color: point.payload.color }]} />;
-}
 
 function barTooltip({ active, payload }) {
   if (!active || !payload?.length) return null;
@@ -97,7 +92,6 @@ export function SolidPieChart({ segments, size = 170 }) {
           >
             {pieData.map((seg) => <Cell key={seg.label} fill={seg.color} />)}
           </Pie>
-          {data.length > 0 && <Tooltip content={pieTooltip} />}
         </PieChart>
       </ResponsiveContainer>
     </div>

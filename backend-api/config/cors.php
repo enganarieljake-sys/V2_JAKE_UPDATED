@@ -7,6 +7,9 @@ return [
 
     'allowed_origins' => [
         env('FRONTEND_URL', 'http://localhost:5173'),
+        // Local Vite can also run on port 5713; allow it so requests are not rejected.
+        'http://localhost:5713',
+        'http://127.0.0.1:5713',
     ],
 
     'allowed_origins_patterns' => [],
