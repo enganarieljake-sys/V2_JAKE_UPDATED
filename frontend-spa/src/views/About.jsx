@@ -3,6 +3,7 @@ import AuthHeader from '../components/AuthHeader';
 import AuthFooter from '../components/AuthFooter';
 import Icon from '../components/Icon';
 import './About.css';
+import UserManualCenter from '../components/UserManualCenter';
 
 // Every statement on this page describes behavior that exists in the current
 // build (see VMS Docs/System-Capabilities.md); keep it that way when editing.
@@ -337,6 +338,8 @@ export default function About() {
             </ol>
           </div>
         </section>
+
+        <UserManualCenter />
 
         <section className="about-section is-tinted" id="roles" aria-labelledby="roles-title">
           <div className="about-container">

@@ -1,0 +1,71 @@
+{
+  "results": [
+    {
+      "language": "en",
+      "download": "VMS_User_Manual_English.pdf",
+      "bytes": 3644436,
+      "sha256": "f772a80193c3eb5c6de8906243de8cc96b0069dcdd340fe07cdb2f95a4c86897",
+      "modal": "correct language; Escape and focus restoration passed",
+      "liveEmail": "not requested in this run"
+    },
+    {
+      "language": "ceb",
+      "download": "VMS_User_Manual_Bisaya.pdf",
+      "bytes": 3648830,
+      "sha256": "7c21699bca3d6d5a70a2b956f7ecf343a5c4d2ed8366fff42704e7c8c7ffb697",
+      "modal": "correct language; Escape and focus restoration passed",
+      "liveEmail": "not requested in this run"
+    },
+    {
+      "language": "fil",
+      "download": "VMS_User_Manual_Tagalog.pdf",
+      "bytes": 3648687,
+      "sha256": "65ef5be6777e1ff046f98069a08c05a73f023124417b4e27353aefb0da939621",
+      "modal": "correct language; Escape and focus restoration passed",
+      "liveEmail": "not requested in this run"
+    },
+    {
+      "theme": "light",
+      "width": 1440,
+      "horizontalOverflow": false,
+      "keyboardFocus": "contained",
+      "cancel": "passed"
+    },
+    {
+      "theme": "light",
+      "width": 768,
+      "horizontalOverflow": false,
+      "keyboardFocus": "contained",
+      "cancel": "passed"
+    },
+    {
+      "theme": "light",
+      "width": 390,
+      "horizontalOverflow": false,
+      "keyboardFocus": "contained",
+      "cancel": "passed"
+    },
+    {
+      "theme": "dark",
+      "width": 1440,
+      "horizontalOverflow": false,
+      "keyboardFocus": "contained",
+      "cancel": "passed"
+    },
+    {
+      "theme": "dark",
+      "width": 768,
+      "horizontalOverflow": false,
+      "keyboardFocus": "contained",
+      "cancel": "passed"
+    },
+    {
+      "theme": "dark",
+      "width": 390,
+      "horizontalOverflow": false,
+      "keyboardFocus": "contained",
+      "cancel": "passed"
+    }
+  ],
+  "consoleExceptions": []
+}
