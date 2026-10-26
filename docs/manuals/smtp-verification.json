@@ -1,0 +1,30 @@
+{
+  "results": [
+    {
+      "language": "en",
+      "download": "VMS_User_Manual_English.pdf",
+      "bytes": 3644403,
+      "sha256": "e4f4cd7f7ef786f8261fb7f54d8bcaf5cb89c188dda651d04d66bba7350ce0f1",
+      "modal": "correct language; Escape and focus restoration passed",
+      "liveEmail": "SMTP acceptance confirmed; inbox placement not asserted"
+    },
+    {
+      "language": "ceb",
+      "download": "VMS_User_Manual_Bisaya.pdf",
+      "bytes": 3648799,
+      "sha256": "07afa83df2e2a655132537d10249a50ecd28f6e3aa40e827cf26882b53093d3c",
+      "modal": "correct language; Escape and focus restoration passed",
+      "liveEmail": "SMTP acceptance confirmed; inbox placement not asserted"
+    },
+    {
+      "language": "fil",
+      "download": "VMS_User_Manual_Tagalog.pdf",
+      "bytes": 3648641,
+      "sha256": "d08bf4db95d1fe8ff32f844a3ed910067f9c3760a4be173987e981fba05b82d9",
+      "modal": "correct language; Escape and focus restoration passed",
+      "liveEmail": "SMTP acceptance confirmed; inbox placement not asserted"
+    }
+  ],
+  "consoleExceptions": [],
+  "note": "Actual UI email submissions to the configured local VMS sender mailbox. SMTP acceptance only; inbox placement not asserted. Hashes identify the PDFs tested before final UI-label wording refinements."
+}

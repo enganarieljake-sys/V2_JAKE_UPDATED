@@ -1,0 +1,23 @@
+{
+  "generated": [
+    {
+      "language": "en",
+      "file": "VMS_User_Manual_English.pdf",
+      "chapters": 23,
+      "screenshotReferences": 23
+    },
+    {
+      "language": "ceb",
+      "file": "VMS_User_Manual_Bisaya.pdf",
+      "chapters": 23,
+      "screenshotReferences": 23
+    },
+    {
+      "language": "fil",
+      "file": "VMS_User_Manual_Tagalog.pdf",
+      "chapters": 23,
+      "screenshotReferences": 23
+    }
+  ],
+  "screenshotCapture": "2026-10-26T09:14:32.260Z"
+}

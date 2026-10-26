@@ -1,0 +1,198 @@
+{
+  "capturedAt": "2026-10-26T09:14:32.260Z",
+  "screenshots": [
+    {
+      "name": "login",
+      "route": "/login",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-dashboard",
+      "route": "/admin?module=dashboard",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-vehicles",
+      "route": "/admin?module=vehicles",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "vehicle-form",
+      "route": "/admin/vehicles/new",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-tickets",
+      "route": "/admin?module=tickets",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-schedules",
+      "route": "/admin?module=schedules",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-maintenance",
+      "route": "/admin?module=maintenance",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-conditions",
+      "route": "/admin?module=conditions",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-reports",
+      "route": "/admin?module=reports",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-logs",
+      "route": "/admin?module=logs",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "admin-locations",
+      "route": "/admin?module=locations",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "proposal-review",
+      "route": "/admin/tickets/3",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "vehicle-profile",
+      "route": "/admin/vehicles/1",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "custodian-dashboard",
+      "route": "/custodian?module=dashboard",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "custodian-vehicles",
+      "route": "/custodian?module=vehicles",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "custodian-conditions",
+      "route": "/custodian?module=conditions",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "condition-form",
+      "route": "/custodian/conditions/new",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "custodian-reportOrPropose",
+      "route": "/custodian?module=reportOrPropose",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "custodian-myTasks",
+      "route": "/custodian?module=myTasks",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "custodian-schedules",
+      "route": "/custodian?module=schedules",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "custodian-histories",
+      "route": "/custodian?module=histories",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "issue-form",
+      "route": "/custodian/issues/new",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "proposal-form",
+      "route": "/custodian/tickets/new",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "schedule-form",
+      "route": "/custodian/schedules/new",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "verification-detail",
+      "route": "/custodian/tickets/2",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "verification-form",
+      "route": "/custodian/tickets/2",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "maintenance-dashboard",
+      "route": "/maintenance?module=dashboard",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "maintenance-ticketWorkOrders",
+      "route": "/maintenance?module=ticketWorkOrders",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "maintenance-maintenance",
+      "route": "/maintenance?module=maintenance",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "maintenance-schedules",
+      "route": "/maintenance?module=schedules",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "repair-detail",
+      "route": "/maintenance/tickets/1",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    },
+    {
+      "name": "repair-form",
+      "route": "/maintenance/work-orders/1/1/log-repairs",
+      "viewport": "1440x1000",
+      "source": "Local seeded VMS application; authenticated through the normal login form"
+    }
+  ],
+  "errors": []
+}

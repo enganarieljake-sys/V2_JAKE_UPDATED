@@ -60,6 +60,10 @@ Route::get('/barangays/{barangay}', [BarangayController::class, 'show']);
 // like /register to blunt scripted spam.
 Route::post('/concern-reports', [ConcernReportController::class, 'store'])->middleware('throttle:5,1');
 
+Route::get('/manuals/challenge', [\App\Http\Controllers\ManualController::class, 'challenge'])->middleware('throttle:manual-challenge');
+Route::get('/manuals/{language}/download', [\App\Http\Controllers\ManualController::class, 'download'])->whereIn('language', ['en', 'ceb', 'fil'])->middleware('throttle:manual-download');
+Route::post('/manuals/email', [\App\Http\Controllers\ManualController::class, 'email'])->middleware('throttle:manual-email');
+
 /*
 |--------------------------------------------------------------------------
 | Protected Routes (Requires a Valid Sanctum Token in Header)
