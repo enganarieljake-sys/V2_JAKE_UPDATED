@@ -30,11 +30,6 @@ function ChartTooltipCard({ rows }) {
   );
 }
 
-function pieTooltip({ active, payload }) {
-  if (!active || !payload?.length) return null;
-  const point = payload[0];
-  return <ChartTooltipCard rows={[{ label: point.name, value: point.value, color: point.payload.color }]} />;
-}
 
 function barTooltip({ active, payload }) {
   if (!active || !payload?.length) return null;
@@ -43,16 +38,11 @@ function barTooltip({ active, payload }) {
 }
 
 export function DonutChart({ segments, centerLabel, centerSubLabel }) {
-  const [hoveredSegment, setHoveredSegment] = useState(null);
   const data = segments.filter((s) => s.value > 0);
   const pieData = data.length ? data : [{ label: 'None', value: 1, color: EMPTY_SLICE_COLOR }];
-  const displayedSegment = hoveredSegment ?? { value: centerLabel, label: centerSubLabel };
-
-  const handleSegmentEnter = (entry) => {
-    // Recharts supplies a rendered sector whose `payload` is the original
-    // segment. Fall back to the entry so this also works across versions.
-    setHoveredSegment(entry?.payload ?? entry);
-  };
+  const [activeSegment, setActiveSegment] = useState(null);
+  const centerValue = activeSegment?.value ?? centerLabel;
+  const centerText = activeSegment?.label ?? centerSubLabel;
 
   return (
     <div className="donut-chart">
@@ -67,16 +57,17 @@ export function DonutChart({ segments, centerLabel, centerSubLabel }) {
             paddingAngle={data.length > 1 ? 2 : 0}
             stroke="none"
             isAnimationActive={false}
-            onMouseEnter={data.length ? handleSegmentEnter : undefined}
-            onMouseLeave={() => setHoveredSegment(null)}
+            onMouseEnter={(_, index) => setActiveSegment(pieData[index] ?? null)}
+            onMouseLeave={() => setActiveSegment(null)}
+            onClick={(_, index) => setActiveSegment((current) => current === pieData[index] ? null : pieData[index] ?? null)}
           >
             {pieData.map((seg) => <Cell key={seg.label} fill={seg.color} />)}
           </Pie>
         </PieChart>
       </ResponsiveContainer>
       <div className="donut-center">
-        <strong>{displayedSegment.value}</strong>
-        <span>{displayedSegment.label}</span>
+        <strong>{centerValue}</strong>
+        <span>{centerText}</span>
       </div>
     </div>
   );
@@ -101,7 +92,6 @@ export function SolidPieChart({ segments, size = 170 }) {
           >
             {pieData.map((seg) => <Cell key={seg.label} fill={seg.color} />)}
           </Pie>
-          {data.length > 0 && <Tooltip content={pieTooltip} />}
         </PieChart>
       </ResponsiveContainer>
     </div>

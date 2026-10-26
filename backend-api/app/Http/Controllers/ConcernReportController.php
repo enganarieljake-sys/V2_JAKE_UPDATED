@@ -19,11 +19,20 @@ class ConcernReportController extends Controller
     {
         $data = $request->validate([
             'concern_type' => ['required', Rule::in(self::TYPES)],
+            'province_name' => ['nullable', 'string', 'max:255'],
+            'city_name' => ['nullable', 'string', 'max:255'],
             'barangay_name' => ['nullable', 'string', 'max:255'],
-            'description' => ['required', 'string', 'max:2000'],
+            'description' => ['nullable', 'required_if:concern_type,Other', 'string', 'max:2000'],
             'reporter_name' => ['nullable', 'string', 'max:255'],
             'reporter_contact' => ['nullable', 'string', 'max:255'],
+        ], [
+            'description.required_if' => 'Please describe the concern.',
         ]);
+
+        // Only "Other" concerns carry a description; the named types explain themselves.
+        if ($data['concern_type'] !== 'Other') {
+            $data['description'] = null;
+        }
 
         ConcernReport::create($data);
 

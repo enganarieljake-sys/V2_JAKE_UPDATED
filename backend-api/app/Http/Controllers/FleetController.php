@@ -29,6 +29,7 @@ use App\Models\VehicleTypeField;
 use App\Rules\NumberOnly;
 use App\Rules\TextOnly;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
@@ -77,8 +78,6 @@ class FleetController extends Controller
             'issue_types' => FaultCategory::orderBy('name')->pluck('name'),
             'maintenance_types' => MaintenanceType::orderBy('name')->pluck('name'),
             'severity_levels' => ['Low', 'Medium', 'High'],
-            // 'In Use' exists in the DB enum but is intentionally not offered —
-            // this system tracks availability only; nothing ever sets In Use.
             'vehicle_statuses' => ['Available', 'Under Maintenance', 'Inactive', 'Decommissioned'],
             // "Needs Inspection" removed per product direction — a Custodian
             // filing a condition check now records either Good or Needs
@@ -104,7 +103,7 @@ class FleetController extends Controller
             ->count();
         $overdueMaintenance = VehicleMaintenanceSchedule::where('status', 'Scheduled')
             ->whereNull('resulting_ticket_id')
-            ->whereDate('scheduled_date', '<', now()->toDateString())
+            ->whereDate('scheduled_date', '<', now('Asia/Manila')->toDateString())
             ->count();
 
         $metrics = [
@@ -227,7 +226,8 @@ class FleetController extends Controller
                 // Work orders are counted per ticket, the same way the page's
                 // Pending card is: tickets still Active in this mechanic's
                 // hands (a two-sub-issue ticket is one work order, not two).
-                'ticketWorkOrders' => MaintenanceTicket::where('assigned_mechanic_id', $request->user()->id)
+                'ticketWorkOrders' => MaintenanceTicket::where(fn ($query) => $query->where('assigned_mechanic_id', $request->user()->id)
+                        ->orWhereHas('subIssues', fn ($subs) => $subs->where('assigned_mechanic_id', $request->user()->id)))
                     ->where('status', 'Active')
                     ->count(),
                 // Admin's queue of Custodian-proposed tickets awaiting
@@ -278,7 +278,7 @@ class FleetController extends Controller
             'overdue_schedules' => VehicleMaintenanceSchedule::with('vehicle:vehicle_id,vehicle_name,plate_number')
                 ->where('status', 'Scheduled')
                 ->whereNull('resulting_ticket_id')
-                ->whereDate('scheduled_date', '<', now()->toDateString())
+                ->whereDate('scheduled_date', '<', now('Asia/Manila')->toDateString())
                 ->orderBy('scheduled_date')
                 ->get(['schedule_id', 'vehicle_id', 'maintenance_type', 'scheduled_date']),
 
@@ -496,6 +496,9 @@ class FleetController extends Controller
         // the readiness check itself, below.
         if (!$latest) {
             return 'unchecked';
+        }
+        if ($vehicle->readiness_invalidated_at && $latest->checked_at->lte($vehicle->readiness_invalidated_at)) {
+            return 'stale';
         }
         if (!$latest->all_passed) {
             return 'not_ready';
@@ -818,11 +821,10 @@ class FleetController extends Controller
             : null;
 
         // #10 — lifetime maintenance cost is the full picture: standalone
-        // maintenance records PLUS every ticket sub-issue's repair cost
-        // (open or closed; cancelled tickets excluded). Previously only the
-        // records were counted, so ticket-driven repairs were invisible.
+        // records plus unfinished ticket items. Done items already have a
+        // ledger entry; adding them again would double-count closed repairs.
         $recordSpend = (float) VehicleMaintenanceRecord::where('vehicle_id', $vehicle->vehicle_id)->sum('maintenance_cost');
-        $ticketSpend = (float) TicketSubIssue::whereHas('ticket', fn ($q) =>
+        $ticketSpend = (float) TicketSubIssue::where('status', '!=', 'Done')->whereHas('ticket', fn ($q) =>
             $q->where('vehicle_id', $vehicle->vehicle_id)->where('status', '!=', 'Cancelled')
         )->sum('maintenance_cost');
         $totalSpend = round($recordSpend + $ticketSpend, 2);
@@ -975,21 +977,16 @@ class FleetController extends Controller
             ->get()
             ->groupBy('vehicle_id');
 
-        // Which vehicles are out on a trip right now (dispatched) — one query.
-        $openTrips = \App\Models\VehicleUsageLog::whereNull('ended_at')->get()->keyBy('vehicle_id');
-
-        $vehicles->each(function (Vehicle $vehicle) use ($latestChecks, $openTicketsByVehicle, $openTrips) {
-            $trip = $openTrips->get($vehicle->vehicle_id);
-            $vehicle->open_trip = $trip ? [
-                'usage_id' => $trip->usage_id, 'purpose' => $trip->purpose, 'destination' => $trip->destination,
-                'driver_name' => $trip->driver_name, 'started_at' => $trip->started_at, 'odometer_start' => $trip->odometer_start,
-            ] : null;
+        $vehicles->each(function (Vehicle $vehicle) use ($latestChecks, $openTicketsByVehicle) {
             $latest = $latestChecks->get($vehicle->vehicle_id);
             $vehicle->readiness_state = $this->responseReadinessState($vehicle, $latest);
             $vehicle->readiness_last_checked = $latest?->checked_at;
 
             $openTickets = $openTicketsByVehicle->get($vehicle->vehicle_id) ?? collect();
+            $vehicle->readiness_block_reason = $this->readinessBlockReason($vehicle, $openTickets->contains(fn ($ticket) => in_array($ticket->status, ['Active', 'For Verification'], true)));
+            $vehicle->can_confirm_readiness = $vehicle->readiness_block_reason === null;
             $vehicle->open_ticket_id = optional($openTickets->first())->ticket_id;
+            $vehicle->open_ticket_number = optional($openTickets->first())->display_number;
             $vehicle->awaiting_closure = $vehicle->status !== 'Available'
                 && $openTickets->contains(fn ($t) => $t->status === 'Active' && $t->isEligibleToClose());
         });
@@ -1000,11 +997,8 @@ class FleetController extends Controller
     public function storeVehicle(Request $request)
     {
         $this->requireAbility($request, 'vehicle.create');
-        // Production-readiness audit finding #6 — the ability above only
-        // says Admin/Custodian are the eligible roles; this is the real
-        // per-account delegation check (Admin always; Custodian only if
-        // granted) an Admin sets per Custodian from the Edit User form.
-        abort_unless($request->user()->canRegisterVehicles(), 403, 'Vehicle registration has not been delegated to your account. Ask your Admin to enable it.');
+        // Keep single registration and import aligned with role eligibility.
+        abort_unless($request->user()->canRegisterVehicles(), 403, 'Your account cannot register vehicles.');
 
         $data = $this->validateVehicle($request);
 
@@ -1076,11 +1070,11 @@ class FleetController extends Controller
 
         $openTickets = MaintenanceTicket::where('vehicle_id', $vehicle->vehicle_id)
             ->whereNotIn('status', ['Closed', 'Cancelled'])
-            ->get(['ticket_id', 'ticket_title']);
+            ->get(['ticket_id', 'barangay_number', 'ticket_title']);
         if ($openTickets->isNotEmpty()) {
             abort(response()->json([
                 'message' => 'Close or cancel this vehicle\'s open ticket(s) before deactivating it.',
-                'open_tickets' => $openTickets->map(fn ($t) => ['ticket_id' => $t->ticket_id, 'ticket_title' => $t->ticket_title])->values(),
+                'open_tickets' => $openTickets->map(fn ($t) => ['ticket_id' => $t->ticket_id, 'barangay_number' => $t->barangay_number, 'ticket_title' => $t->ticket_title])->values(),
             ], 422));
         }
 
@@ -1121,6 +1115,8 @@ class FleetController extends Controller
             'decommissioned_at' => null,
         ]);
 
+        \App\Services\VehicleOperationalState::refresh($vehicle, true);
+
         $verb = $wasDecommissioned ? 'recommissioned' : 'restored';
         $this->history($vehicle, 'Vehicle Restored', "{$vehicle->vehicle_name} was {$verb} to active service.", 'vehicles', $vehicle->vehicle_id, $request);
         $this->log($request, 'Restore', 'Vehicle Management', $vehicle->vehicle_id, ucfirst($verb) . " vehicle {$vehicle->vehicle_name}");
@@ -1143,11 +1139,11 @@ class FleetController extends Controller
 
         $openTickets = MaintenanceTicket::where('vehicle_id', $vehicle->vehicle_id)
             ->whereNotIn('status', ['Closed', 'Cancelled'])
-            ->get(['ticket_id', 'ticket_title']);
+            ->get(['ticket_id', 'barangay_number', 'ticket_title']);
         if ($openTickets->isNotEmpty()) {
             abort(response()->json([
                 'message' => 'Close or cancel this vehicle\'s open ticket(s) before decommissioning it.',
-                'open_tickets' => $openTickets->map(fn ($t) => ['ticket_id' => $t->ticket_id, 'ticket_title' => $t->ticket_title])->values(),
+                'open_tickets' => $openTickets->map(fn ($t) => ['ticket_id' => $t->ticket_id, 'barangay_number' => $t->barangay_number, 'ticket_title' => $t->ticket_title])->values(),
             ], 422));
         }
 
@@ -1178,12 +1174,28 @@ class FleetController extends Controller
      */
     public function storeReadinessCheck(Request $request, Vehicle $vehicle)
     {
+        return DB::transaction(function () use ($request, $vehicle) {
+            $vehicle = Vehicle::whereKey($vehicle->vehicle_id)->lockForUpdate()->firstOrFail();
+            return $this->storeReadinessCheckLocked($request, $vehicle);
+        });
+    }
+
+    private function readinessBlockReason(Vehicle $vehicle, bool $hasActiveTicket): ?string
+    {
+        if ($vehicle->status === 'Under Maintenance' || $hasActiveTicket) {
+            return 'Readiness cannot be confirmed while maintenance is ongoing. Finish the maintenance work and have the assigned Custodian independently verify the repairs so all active tickets are closed or the maintenance record is verified. Then personally check and operate the vehicle before confirming readiness.';
+        }
+        if (in_array($vehicle->status, ['Inactive', 'Decommissioned'], true)) {
+            return 'This vehicle is out of the fleet and cannot be readiness-checked.';
+        }
+        return null;
+    }
+
+    private function storeReadinessCheckLocked(Request $request, Vehicle $vehicle)
+    {
         $this->requireAbility($request, 'vehicle.readiness_check');
-        abort_if(
-            in_array($vehicle->status, ['Inactive', 'Decommissioned'], true),
-            422,
-            'This vehicle is out of the fleet and cannot be readiness-checked.'
-        );
+        $blockedReason = $this->readinessBlockReason($vehicle, MaintenanceTicket::where('vehicle_id', $vehicle->vehicle_id)->whereIn('status', ['Active', 'For Verification'])->exists());
+        abort_if($blockedReason !== null, 422, $blockedReason);
 
         // Simplified per product direction: the readiness check is a plain
         // attestation ("I confirm I personally checked and operated this
@@ -1198,6 +1210,7 @@ class FleetController extends Controller
             'notes'     => ['nullable', 'string'],
         ]);
 
+        $vehicle->update(['readiness_invalidated_at' => null]);
         $check = VehicleReadinessCheck::create([
             'vehicle_id' => $vehicle->vehicle_id,
             'checked_by' => $request->user()->id,
@@ -1251,7 +1264,7 @@ class FleetController extends Controller
 
         $latestCheck = $vehicle->readinessChecks()->orderByDesc('checked_at')->first();
         abort_unless(
-            $latestCheck && $latestCheck->all_passed,
+            $latestCheck && $latestCheck->all_passed && $latestCheck->checked_at->gte(now()->subHours(self::READINESS_FRESHNESS_HOURS)) && (!$vehicle->readiness_invalidated_at || $latestCheck->checked_at->gt($vehicle->readiness_invalidated_at)),
             422,
             'This vehicle needs a passing readiness check before it can be marked Available.'
         );
@@ -1269,7 +1282,7 @@ class FleetController extends Controller
         $vehicle->update(['status' => 'Available']);
 
         $historyNote = $wasOverridingRepairFlag
-            ? "{$vehicle->vehicle_name} was marked Available after a passing readiness check, despite its condition still being Needs Repair — dispatched for operational need with the repair still outstanding."
+            ? "{$vehicle->vehicle_name} was marked Available after a passing readiness check, despite its condition still being Needs Repair — the repair remains outstanding."
             : "{$vehicle->vehicle_name} was marked Available after a passing readiness check.";
         $this->history($vehicle, 'Vehicle Marked Available', $historyNote, 'vehicles', $vehicle->vehicle_id, $request);
         $this->log($request, 'Edit', 'Vehicle Management', $vehicle->vehicle_id, "Marked {$vehicle->vehicle_name} Available");
@@ -1292,14 +1305,19 @@ class FleetController extends Controller
         $activeTicket = MaintenanceTicket::where('vehicle_id', $vehicle->vehicle_id)
             ->whereNotIn('status', ['Closed', 'Cancelled'])
             ->orderByDesc('ticket_id')
-            ->first(['ticket_id', 'ticket_title']);
+            ->get(['ticket_id', 'barangay_number', 'ticket_title', 'status']);
+        $blockedReason = $this->readinessBlockReason($vehicle, $activeTicket->contains(fn ($ticket) => in_array($ticket->status, ['Active', 'For Verification'], true)));
+        $activeTicket = $activeTicket->first();
 
         return response()->json([
+            'can_confirm_readiness' => $blockedReason === null,
+            'readiness_block_reason' => $blockedReason,
             'state'              => $this->responseReadinessState($vehicle, $latest),
             'last_checked'       => $latest?->checked_at,
             'latest_checklist'   => $latest?->checklist,
             'freshness_hours'    => self::READINESS_FRESHNESS_HOURS,
             'active_ticket_id'   => $activeTicket?->ticket_id,
+            'active_ticket_number' => $activeTicket?->display_number,
             'active_ticket_title' => $activeTicket?->ticket_title,
             'history'            => $vehicle->readinessChecks()
                 ->with('checkedBy:id,name')
@@ -1358,7 +1376,7 @@ class FleetController extends Controller
             return collect();
         }
 
-        $query = VehicleConditionCheck::with(['vehicle.category', 'checkedBy', 'resultingTicket:ticket_id,status,ticket_title']);
+        $query = VehicleConditionCheck::with(['vehicle.category', 'checkedBy', 'resultingTicket:ticket_id,barangay_number,status,ticket_title']);
 
         $query->when($request->filled('vehicle_id'), fn ($q) => $q->where('vehicle_id', $request->vehicle_id))
             ->when($request->filled('condition_result'), fn ($q) => $q->where('condition_result', $request->condition_result));
@@ -1491,6 +1509,14 @@ class FleetController extends Controller
     {
         $this->requireAbility($request, 'issue.view');
 
+        // Same visibility rule as issues(), so a report hidden from the list
+        // can't be opened just by its id.
+        $user = $request->user();
+        if (!$user->hasRole('Admin') && (int) $issue->reported_by !== (int) $user->id) {
+            $filedByCustodian = (bool) $issue->reportedBy?->hasRole('Custodian');
+            abort_unless($user->hasRole('Custodian') && !$filedByCustodian, 403, 'You can only view your own issue reports.');
+        }
+
         return $issue->load(['vehicle.category', 'reportedBy', 'maintenanceTicket', 'attachments.uploadedBy']);
     }
 
@@ -1528,11 +1554,11 @@ class FleetController extends Controller
         // queue of everyone else's reports — that stays a Custodian/Admin
         // concern, so this scopes to reports THEY filed.
         if ($user->hasRole('Maintenance Personnel') && !$user->hasAnyRole(['Admin', 'Custodian'])) {
-            return VehicleIssueReport::with(['vehicle.category', 'reportedBy', 'maintenanceTicket', 'attachments'])
+            return $this->withBarangayDisplayNumbers(VehicleIssueReport::with(['vehicle.category', 'reportedBy', 'maintenanceTicket', 'attachments'])
                 ->where('reported_by', $user->id)
                 ->whereHas('vehicle', fn ($q) => $q->whereNotIn('status', ['Inactive', 'Decommissioned']))
                 ->latest('issue_report_id')
-                ->get();
+                ->get());
         }
 
         // Issues on retired (Inactive/Decommissioned) vehicles are excluded —
@@ -1571,7 +1597,62 @@ class FleetController extends Controller
             });
         }
 
-        return $query->latest('issue_report_id')->get();
+        return $this->withBarangayDisplayNumbers($query->latest('issue_report_id')->get());
+    }
+
+    /**
+     * Public-facing report and ticket numbers restart in every barangay.
+     * Their database primary keys intentionally remain global: routes,
+     * foreign keys, notifications, and audit logs depend on those stable IDs.
+     */
+    private function withBarangayDisplayNumbers(Collection $issues): Collection
+    {
+        $barangayIds = $issues->pluck('vehicle.barangay_id')->filter()->unique()->values();
+        if ($barangayIds->isEmpty()) {
+            return $issues;
+        }
+
+        $issueNumbers = $this->barangaySequenceNumbers(
+            VehicleIssueReport::withoutGlobalScopes()
+                ->with('vehicle:vehicle_id,barangay_id')
+                ->whereHas('vehicle', fn ($query) => $query->whereIn('barangay_id', $barangayIds))
+                ->orderBy('issue_report_id')
+                ->get(),
+            'issue_report_id'
+        );
+        $ticketNumbers = $this->barangaySequenceNumbers(
+            MaintenanceTicket::withoutGlobalScopes()
+                ->with('vehicle:vehicle_id,barangay_id')
+                ->whereHas('vehicle', fn ($query) => $query->whereIn('barangay_id', $barangayIds))
+                ->orderBy('ticket_id')
+                ->get(),
+            'ticket_id'
+        );
+
+        $issues->each(function (VehicleIssueReport $issue) use ($issueNumbers, $ticketNumbers): void {
+            $issue->setAttribute('display_issue_report_id', $issueNumbers[$issue->issue_report_id] ?? $issue->issue_report_id);
+
+            if ($issue->maintenanceTicket) {
+                $ticket = $issue->maintenanceTicket;
+                $ticket->setAttribute('display_ticket_id', $ticketNumbers[$ticket->ticket_id] ?? $ticket->ticket_id);
+            }
+        });
+
+        return $issues;
+    }
+
+    private function barangaySequenceNumbers(Collection $records, string $key): array
+    {
+        $numbers = [];
+
+        $records->groupBy(fn ($record) => $record->vehicle?->barangay_id)
+            ->each(function (Collection $barangayRecords) use (&$numbers, $key): void {
+                $barangayRecords->values()->each(function ($record, int $index) use (&$numbers, $key): void {
+                    $numbers[$record->getAttribute($key)] = $index + 1;
+                });
+            });
+
+        return $numbers;
     }
 
     public function storeIssue(Request $request)
@@ -1897,6 +1978,7 @@ class FleetController extends Controller
 
         if ($request->hasFile('file')) {
             $data['file_url'] = $this->storeUploadedImage($request->file('file'), 'vehicle-documents');
+            \App\Models\ManagedFile::removeReference($document->file_url);
         }
         unset($data['file']);
 
@@ -1911,6 +1993,7 @@ class FleetController extends Controller
         $this->requireAbility($request, 'document.delete');
 
         $this->log($request, 'Delete', 'Vehicle Documents', $document->document_id, "Deleted document \"{$document->title}\"");
+        \App\Models\ManagedFile::removeReference($document->file_url);
         $document->delete();
 
         return response()->json(['message' => 'Document deleted.']);
@@ -1928,15 +2011,13 @@ class FleetController extends Controller
             'verifiedBy',
             'confirmedBy',
             'originatingSchedule',
+            'ticketSubIssue.ticket.originatingSchedule',
         ]);
 
-        // Maintenance Personnel see their own repairs (their "Maintenance
-        // Records"/"Maintenance History" sidebar entries) rather than the
-        // whole barangay-wide ledger — a Custodian/Admin concern.
-        if ($user->hasRole('Maintenance Personnel') && !$user->hasAnyRole(['Admin', 'Custodian'])) {
+        // The ledger includes all repair sources within the vehicle's barangay.
+        // Personal history remains available through the explicit mine filter.
+        if ($request->boolean('mine')) {
             $query->where('maintenance_personnel_id', $user->id);
-        } elseif ($request->boolean('mine')) {
-            $query->where('maintenance_personnel_id', $request->user()->id);
         }
 
         if ($request->boolean('history')) {
@@ -1967,7 +2048,7 @@ class FleetController extends Controller
 
     public function showMaintenanceRecord(Request $request, VehicleMaintenanceRecord $record)
     {
-        return $record->load(['vehicle.category', 'sourceVehicle', 'issueReport', 'maintenancePersonnel', 'verifiedBy', 'confirmedBy', 'originatingSchedule']);
+        return $record->load(['vehicle.category', 'sourceVehicle', 'issueReport', 'maintenancePersonnel', 'verifiedBy', 'confirmedBy', 'originatingSchedule', 'ticketSubIssue.ticket.originatingSchedule']);
     }
 
     public function storeMaintenanceRecord(Request $request)
@@ -1985,7 +2066,7 @@ class FleetController extends Controller
             'maintenance_type' => ['required', 'string', 'max:150'],
             'problem_reason' => ['required', 'string'],
             'date_started' => ['nullable', 'date'],
-            'date_completed' => ['nullable', 'date'],
+            'date_completed' => ['nullable', 'date', 'before_or_equal:' . now('Asia/Manila')->toDateString()],
             'maintenance_personnel_id' => ['nullable', 'exists:users,id'],
             // Free-text fallback for someone outside the system entirely
             // (a volunteer, an outside helper) — mutually exclusive with
@@ -2046,10 +2127,7 @@ class FleetController extends Controller
 
             $record = VehicleMaintenanceRecord::create($createPayload);
 
-            $vehicle->update([
-                'status' => 'Under Maintenance',
-                'condition' => 'Needs Repair',
-            ]);
+            \App\Services\VehicleOperationalState::hold($vehicle);
 
             if (! empty($data['issue_report_id'])) {
                 VehicleIssueReport::where('issue_report_id', $data['issue_report_id'])->update([
@@ -2103,6 +2181,14 @@ class FleetController extends Controller
 
     public function updateMaintenanceRecord(Request $request, VehicleMaintenanceRecord $record)
     {
+        return DB::transaction(function () use ($request, $record) {
+            $record = VehicleMaintenanceRecord::whereKey($record->getKey())->lockForUpdate()->firstOrFail();
+            return $this->updateMaintenanceRecordLocked($request, $record);
+        });
+    }
+
+    private function updateMaintenanceRecordLocked(Request $request, VehicleMaintenanceRecord $record)
+    {
         $this->requireAbility($request, 'record.edit');
 
         $data = $request->validate([
@@ -2112,7 +2198,7 @@ class FleetController extends Controller
             'maintenance_type' => ['sometimes', 'string', 'max:150'],
             'problem_reason' => ['sometimes', 'string'],
             'date_started' => ['nullable', 'date'],
-            'date_completed' => ['nullable', 'date'],
+            'date_completed' => ['nullable', 'date', 'before_or_equal:' . now('Asia/Manila')->toDateString()],
             'maintenance_personnel_id' => ['nullable', 'exists:users,id'],
             'performed_by_other' => ['nullable', 'string', 'max:255'],
             'is_external' => ['nullable', 'boolean'],
@@ -2127,6 +2213,19 @@ class FleetController extends Controller
         ], [
             'source_vehicle_id.different' => 'A vehicle cannot be the source of its own part.',
         ]);
+
+        if (!empty($data['source_vehicle_id'])) {
+            $donor = Vehicle::findOrFail($data['source_vehicle_id']);
+            abort_if($donor->vehicle_id === $record->vehicle_id, 422, 'A vehicle cannot donate a part to itself.');
+        }
+        if (!empty($data['issue_report_id'])) {
+            $issue = VehicleIssueReport::findOrFail($data['issue_report_id']);
+            abort_unless($issue->vehicle_id === $record->vehicle_id, 422, 'The issue must belong to this maintenance record vehicle.');
+        }
+        if (!empty($data['maintenance_personnel_id'])) {
+            $person = User::findOrFail($data['maintenance_personnel_id']);
+            abort_unless($person->barangay_id === $record->vehicle->barangay_id, 422, 'The repair performer must belong to this barangay.');
+        }
 
         if (isset($data['maintenance_type'])) {
             $data['maintenance_type'] = MaintenanceType::resolve($data['maintenance_type']);
@@ -2146,6 +2245,7 @@ class FleetController extends Controller
         if (($data['progress_status'] ?? null) === 'Completed' && $request->user()->hasRole('Maintenance Personnel') && !$request->user()->hasRole('Admin')) {
             $data['progress_status'] = 'For Verification';
             $data['date_completed'] = null;
+            $data['test_attested'] = false;
             $data['verification_result'] = null;
             $data['verification_notes'] = null;
             $data['verified_by'] = null;
@@ -2181,7 +2281,15 @@ class FleetController extends Controller
             }
         }
 
-        $record->update($data);
+        $record->fill($data);
+        $repairFields = ['source_vehicle_id', 'part_name', 'issue_report_id', 'maintenance_type', 'problem_reason', 'maintenance_personnel_id', 'performed_by_other', 'is_external', 'external_vendor', 'receipt_url', 'action_taken', 'parts_used', 'progress_status'];
+        $repairChanged = $record->isDirty($repairFields);
+        abort_if($record->getOriginal('progress_status') === 'Completed' && $repairChanged, 422, 'Completed repair work is locked. Only administrative details may be corrected.');
+        if ($repairChanged && $record->verification_result !== null) {
+            $record->fill(['test_attested' => false, 'verification_result' => null, 'verification_notes' => null, 'verified_by' => null, 'verified_at' => null, 'confirmed_by' => null, 'confirmed_at' => null]);
+            if (!array_key_exists('progress_status', $data)) $record->progress_status = 'For Verification';
+        }
+        $record->save();
 
         if ($record->issue_report_id) {
             $record->issueReport()->update([
@@ -2215,6 +2323,14 @@ class FleetController extends Controller
 
     public function verifyMaintenance(Request $request, VehicleMaintenanceRecord $record)
     {
+        return DB::transaction(function () use ($request, $record) {
+            $record = VehicleMaintenanceRecord::whereKey($record->getKey())->lockForUpdate()->firstOrFail();
+            return $this->verifyMaintenanceLocked($request, $record);
+        });
+    }
+
+    private function verifyMaintenanceLocked(Request $request, VehicleMaintenanceRecord $record)
+    {
         $this->requireAbility($request, 'record.verify');
 
         abort_unless(
@@ -2247,7 +2363,8 @@ class FleetController extends Controller
 
         $data = $request->validate([
             'verification_result' => ['required', Rule::in(['Passed', 'Failed'])],
-            'verification_notes' => ['nullable', 'string'],
+            'verification_notes' => ['required_if:verification_result,Failed', 'nullable', 'string'],
+            'test_attested' => ['required_if:verification_result,Passed', 'accepted_if:verification_result,Passed'],
         ]);
 
         DB::transaction(function () use ($record, $data, $request) {
@@ -2257,6 +2374,7 @@ class FleetController extends Controller
                 'progress_status' => $passed ? 'For Verification' : 'Under Repair',
                 'verification_result' => $data['verification_result'],
                 'verification_notes' => $data['verification_notes'] ?? null,
+                'test_attested' => $passed && $request->boolean('test_attested'),
                 'verified_by' => $request->user()->id,
                 'verified_at' => now(),
             ]);
@@ -2267,10 +2385,7 @@ class FleetController extends Controller
                 ]);
             }
 
-            $record->vehicle->update([
-                'status' => 'Under Maintenance',
-                'condition' => $passed ? 'Needs Inspection' : 'Needs Repair',
-            ]);
+            \App\Services\VehicleOperationalState::hold($record->vehicle, $passed ? 'Needs Inspection' : 'Needs Repair');
 
             $activity = $passed ? 'Repair Verification Passed' : 'Repair Verification Failed';
             $this->history($record->vehicle, $activity, "Custodian marked maintenance #{$record->maintenance_id} as {$data['verification_result']}.", 'vehicle_maintenance_records', $record->maintenance_id, $request);
@@ -2282,6 +2397,14 @@ class FleetController extends Controller
 
     public function confirmMaintenance(Request $request, VehicleMaintenanceRecord $record)
     {
+        return DB::transaction(function () use ($request, $record) {
+            $record = VehicleMaintenanceRecord::whereKey($record->getKey())->lockForUpdate()->firstOrFail();
+            return $this->confirmMaintenanceLocked($request, $record);
+        });
+    }
+
+    private function confirmMaintenanceLocked(Request $request, VehicleMaintenanceRecord $record)
+    {
         $this->requireAbility($request, 'record.confirm');
 
         abort_unless(
@@ -2289,6 +2412,7 @@ class FleetController extends Controller
             422,
             'This maintenance record has not passed Custodian verification yet.'
         );
+        abort_if($record->verified_by !== null && (int) $record->verified_by === (int) $record->maintenance_personnel_id, 422, 'Repair work must be verified by someone other than the performer.');
 
         $data = $request->validate([
             'confirmed' => ['required', 'boolean'],
@@ -2305,15 +2429,10 @@ class FleetController extends Controller
                     'remarks' => $data['remarks'] ?? $record->remarks,
                 ]);
 
-                $record->vehicle->update([
-                    'status' => 'Available',
-                    'condition' => 'Good',
-                    'estimated_return_date' => null, // back in service — clear the forecast estimate
-                ]);
-
                 if ($record->issueReport) {
                     $record->issueReport->update(['status' => 'Resolved']);
                 }
+                \App\Services\VehicleOperationalState::refresh($record->vehicle, true);
 
                 $this->history($record->vehicle, 'Ticket Closed', "Maintenance #{$record->maintenance_id} was confirmed and closed.", 'vehicle_maintenance_records', $record->maintenance_id, $request);
                 $this->log($request, 'Edit', 'Vehicle Maintenance Records', $record->maintenance_id, "Confirmed maintenance #{$record->maintenance_id}");
@@ -2327,17 +2446,14 @@ class FleetController extends Controller
                 // forever and verifyMaintenance()'s re-verification guard
                 // would permanently block a fresh check once the rework is
                 // actually done and this comes back to 'For Verification'.
-                'verification_result' => null,
+                'test_attested' => false, 'verification_result' => null,
                 'verification_notes' => null,
                 'verified_by' => null,
                 'verified_at' => null,
                 'remarks' => $data['remarks'] ?? $record->remarks,
             ]);
 
-            $record->vehicle->update([
-                'status' => 'Under Maintenance',
-                'condition' => 'Needs Repair',
-            ]);
+            \App\Services\VehicleOperationalState::hold($record->vehicle);
 
             if ($record->issueReport) {
                 $record->issueReport->update(['status' => 'Under Review']);
@@ -2366,6 +2482,14 @@ class FleetController extends Controller
      * verification result" is exactly how the UI spots and flags one.
      */
     public function decisionCloseMaintenance(Request $request, VehicleMaintenanceRecord $record)
+    {
+        return DB::transaction(function () use ($request, $record) {
+            $record = VehicleMaintenanceRecord::whereKey($record->getKey())->lockForUpdate()->firstOrFail();
+            return $this->decisionCloseMaintenanceLocked($request, $record);
+        });
+    }
+
+    private function decisionCloseMaintenanceLocked(Request $request, VehicleMaintenanceRecord $record)
     {
         $this->requireAbility($request, 'record.decision_close');
 
@@ -2407,15 +2531,16 @@ class FleetController extends Controller
                 'confirmed_at'    => now(),
             ]);
 
-            $record->vehicle->update($returnToService
-                ? ['status' => 'Available', 'condition' => 'Good', 'estimated_return_date' => null]
-                : ['status' => 'Under Maintenance', 'condition' => 'Needs Repair']);
-
             // Only resolve the originating report if the vehicle was actually
             // judged fit — otherwise the problem still stands and the report
             // must stay visible instead of quietly closing with the record.
             if ($record->issueReport) {
                 $record->issueReport->update(['status' => $returnToService ? 'Resolved' : 'Under Review']);
+            }
+            if ($returnToService) {
+                \App\Services\VehicleOperationalState::refresh($record->vehicle, true);
+            } else {
+                \App\Services\VehicleOperationalState::hold($record->vehicle);
             }
 
             // The Custodians had this in their Pending Verifications queue.
@@ -2452,6 +2577,7 @@ class FleetController extends Controller
             'assignedToUser',
             // Nested so the "View Maintenance Record" detail modal has full
             // info (vehicle, personnel, verifier) without a second fetch.
+            'resultingTicket:ticket_id,barangay_number,ticket_title,status',
             'resultingMaintenance.vehicle',
             'resultingMaintenance.sourceVehicle',
             'resultingMaintenance.maintenancePersonnel',
@@ -2592,6 +2718,8 @@ class FleetController extends Controller
         $data['maintenance_type'] = MaintenanceType::resolve($data['maintenance_type']);
 
         $vehicle = Vehicle::findOrFail($data['vehicle_id']);
+        abort_if(in_array($vehicle->status, ['Inactive', 'Decommissioned'], true), 422, 'Cannot schedule a retired vehicle.');
+        $this->validateScheduleAssignee($data['assigned_to'] ?? null, $vehicle);
 
         $conflicts = $this->checkScheduleConflicts($vehicle, $data['scheduled_date']);
         if ($conflicts && !$request->boolean('confirm_conflicts')) {
@@ -2691,6 +2819,14 @@ class FleetController extends Controller
      */
     public function approveSchedule(Request $request, VehicleMaintenanceSchedule $schedule)
     {
+        return DB::transaction(function () use ($request, $schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->getKey())->lockForUpdate()->firstOrFail();
+            return $this->approveScheduleLocked($request, $schedule);
+        });
+    }
+
+    private function approveScheduleLocked(Request $request, VehicleMaintenanceSchedule $schedule)
+    {
         $this->requireAbility($request, 'schedule.approve');
 
         // A previously Declined schedule can be approved directly — Admin
@@ -2701,6 +2837,8 @@ class FleetController extends Controller
             "Only a Pending Approval or Declined schedule can be approved. Current: {$schedule->status}."
         );
 
+        $this->validateScheduleAssignee($schedule->assigned_to, $schedule->vehicle);
+        abort_if(in_array($schedule->vehicle->status, ['Inactive', 'Decommissioned'], true), 422, 'Cannot approve maintenance for a retired vehicle.');
         $schedule = DB::transaction(function () use ($schedule, $request) {
             $locked = VehicleMaintenanceSchedule::where('schedule_id', $schedule->schedule_id)->lockForUpdate()->first();
             abort_unless($locked && in_array($locked->status, ['Pending Approval', 'Declined'], true), 422, 'This schedule was already reviewed.');
@@ -2742,6 +2880,14 @@ class FleetController extends Controller
      */
     public function declineSchedule(Request $request, VehicleMaintenanceSchedule $schedule)
     {
+        return DB::transaction(function () use ($request, $schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->getKey())->lockForUpdate()->firstOrFail();
+            return $this->declineScheduleLocked($request, $schedule);
+        });
+    }
+
+    private function declineScheduleLocked(Request $request, VehicleMaintenanceSchedule $schedule)
+    {
         $this->requireAbility($request, 'schedule.decline');
 
         abort_unless($schedule->status === 'Pending Approval', 422, "Only a Pending Approval schedule can be declined. Current: {$schedule->status}.");
@@ -2776,6 +2922,14 @@ class FleetController extends Controller
      */
     public function undeclineSchedule(Request $request, VehicleMaintenanceSchedule $schedule)
     {
+        return DB::transaction(function () use ($request, $schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->getKey())->lockForUpdate()->firstOrFail();
+            return $this->undeclineScheduleLocked($request, $schedule);
+        });
+    }
+
+    private function undeclineScheduleLocked(Request $request, VehicleMaintenanceSchedule $schedule)
+    {
         $this->requireAbility($request, 'schedule.decline');
 
         abort_unless($schedule->status === 'Declined', 422, "Only a Declined schedule can be undeclined. Current: {$schedule->status}.");
@@ -2797,8 +2951,18 @@ class FleetController extends Controller
 
     public function updateSchedule(Request $request, VehicleMaintenanceSchedule $schedule)
     {
+        return DB::transaction(function () use ($request, $schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->getKey())->lockForUpdate()->firstOrFail();
+            return $this->updateScheduleLocked($request, $schedule);
+        });
+    }
+
+    private function updateScheduleLocked(Request $request, VehicleMaintenanceSchedule $schedule)
+    {
         $this->requireAbility($request, 'schedule.edit');
+        abort_unless((int) $schedule->created_by === (int) $request->user()->id, 403, 'Only the Custodian who booked this schedule may edit it.');
         $this->abortUnlessOwnBarangaySchedule($schedule);
+        $this->assertSchedulePlanEditable($schedule);
 
         $data = $request->validate([
             'vehicle_id' => ['sometimes', 'exists:vehicles,vehicle_id'],
@@ -2813,11 +2977,22 @@ class FleetController extends Controller
             // creates the proof-of-work maintenance record and, if recurring,
             // seeds the next occurrence. Setting status directly would
             // silently skip both.
-            'status' => ['nullable', Rule::in(['Scheduled', 'Cancelled'])],
+            'status' => ['sometimes', Rule::in(['Cancelled'])],
             'recurrence_months' => ['nullable', 'integer', 'min:1', 'max:60'],
             'confirm_conflicts' => ['nullable', 'boolean'],
         ]);
 
+        if (isset($data['status'])) return $this->deleteSchedule($request, $schedule);
+
+        $targetVehicle = isset($data['vehicle_id']) ? Vehicle::findOrFail($data['vehicle_id']) : $schedule->vehicle;
+        abort_if(in_array($targetVehicle->status, ['Inactive', 'Decommissioned'], true), 422, 'Cannot schedule a retired vehicle.');
+        if (array_key_exists('assigned_to', $data)) {
+            $this->validateScheduleAssignee($data['assigned_to'], $targetVehicle);
+            abort_if($schedule->status === 'Scheduled' && (int) $data['assigned_to'] !== (int) $schedule->assigned_to,
+                403, 'Only Admin may reassign an approved schedule.');
+        } else {
+            $this->validateScheduleAssignee($schedule->assigned_to, $targetVehicle);
+        }
         if (isset($data['maintenance_type'])) {
             $data['maintenance_type'] = MaintenanceType::resolve($data['maintenance_type']);
         }
@@ -2836,13 +3011,22 @@ class FleetController extends Controller
 
         $previousAssignee = $schedule->assigned_to;
 
-        $schedule->update($data);
+        unset($data['confirm_conflicts']);
+        $schedule->fill($data);
+        $needsReview = $schedule->isDirty();
+        if ($needsReview) {
+            $schedule->fill(['status' => 'Pending Approval', 'decline_reason' => null]);
+        }
+        $schedule->save();
+        if ($needsReview) {
+            $this->notifyAdmins('Maintenance Schedule Changed', "{$request->user()->name} updated schedule #{$schedule->schedule_id}; review the changed plan before it proceeds.", 'schedule_proposed', $schedule->vehicle->barangay_id, ['schedule_id' => $schedule->schedule_id]);
+        }
         $this->history($schedule->vehicle, 'Maintenance Schedule Updated', "Maintenance schedule #{$schedule->schedule_id} was updated.", 'vehicle_maintenance_schedules', $schedule->schedule_id, $request);
         $this->log($request, 'Edit', 'Vehicle Maintenance Schedule', $schedule->schedule_id, "Updated schedule #{$schedule->schedule_id}");
 
         // Notify on assignment or reassignment so the (new) mechanic finds out
         // proactively instead of having to browse the shared schedule list.
-        if (array_key_exists('assigned_to', $data) && $data['assigned_to'] && (int) $data['assigned_to'] !== (int) $previousAssignee) {
+        if ($schedule->status === 'Scheduled' && array_key_exists('assigned_to', $data) && $data['assigned_to'] && (int) $data['assigned_to'] !== (int) $previousAssignee) {
             $this->notifyUser(
                 (int) $data['assigned_to'],
                 'Maintenance Assigned to You',
@@ -2865,7 +3049,16 @@ class FleetController extends Controller
      */
     public function completeSchedule(Request $request, VehicleMaintenanceSchedule $schedule)
     {
+        return DB::transaction(function () use ($request, $schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->getKey())->lockForUpdate()->firstOrFail();
+            return $this->completeScheduleLocked($request, $schedule);
+        });
+    }
+
+    private function completeScheduleLocked(Request $request, VehicleMaintenanceSchedule $schedule)
+    {
         $this->requireAbility($request, 'schedule.complete');
+        abort_if(in_array($schedule->vehicle->status, ['Inactive', 'Decommissioned'], true), 422, 'Cannot complete a schedule for a retired vehicle.');
 
         abort_unless($schedule->status === 'Scheduled', 422, "Only a scheduled maintenance can be marked done. Current: {$schedule->status}.");
 
@@ -2897,7 +3090,7 @@ class FleetController extends Controller
         );
 
         $data = $request->validate([
-            'date_completed'           => ['nullable', 'date'],
+            'date_completed'           => ['nullable', 'date', 'before_or_equal:' . now('Asia/Manila')->toDateString()],
             'maintenance_cost'         => ['nullable', 'numeric', 'min:0'],
             'is_external'              => ['nullable', 'boolean'],
             'external_vendor'          => ['nullable', 'string', 'max:255'],
@@ -2961,7 +3154,7 @@ class FleetController extends Controller
             // (storeMaintenanceRecord, verifyMaintenance, confirmMaintenance)
             // — a vehicle with a repair sitting in the Custodian's
             // verification queue should visibly show that, not look untouched.
-            $vehicle->update(['status' => 'Under Maintenance', 'condition' => 'Needs Repair']);
+            \App\Services\VehicleOperationalState::hold($vehicle, 'Needs Inspection');
 
             // 2) Close the schedule — the CALENDAR task is done regardless of
             // how long the paperwork verification takes; recurrence below
@@ -3004,6 +3197,14 @@ class FleetController extends Controller
      */
     public function reassignSchedule(Request $request, VehicleMaintenanceSchedule $schedule)
     {
+        return DB::transaction(function () use ($request, $schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->getKey())->lockForUpdate()->firstOrFail();
+            return $this->reassignScheduleLocked($request, $schedule);
+        });
+    }
+
+    private function reassignScheduleLocked(Request $request, VehicleMaintenanceSchedule $schedule)
+    {
         $this->requireAbility($request, 'schedule.reassign');
 
         abort_unless($schedule->status === 'Scheduled', 422, "Only a Scheduled entry can be reassigned. Current status: {$schedule->status}.");
@@ -3012,6 +3213,8 @@ class FleetController extends Controller
             'assigned_to' => ['required', 'exists:users,id'],
         ]);
 
+        $this->assertSchedulePlanEditable($schedule);
+        $this->validateScheduleAssignee($data['assigned_to'], $schedule->vehicle);
         $newAssignee = User::findOrFail($data['assigned_to']);
         abort_if($newAssignee->id === $schedule->assigned_to, 422, 'That person is already assigned to this schedule.');
 
@@ -3054,12 +3257,35 @@ class FleetController extends Controller
         abort_unless($schedule->vehicle()->exists(), 404);
     }
 
+    private function validateScheduleAssignee(?int $id, Vehicle $vehicle): void
+    {
+        if (!$id) return;
+        $person = User::findOrFail($id);
+        abort_unless($person->is_active && $person->hasRole('Maintenance Personnel') && $person->barangay_id === $vehicle->barangay_id,
+            422, 'Choose active Maintenance Personnel from this barangay.');
+    }
+
+    private function assertSchedulePlanEditable(VehicleMaintenanceSchedule $schedule): void
+    {
+        abort_if($schedule->status === 'Completed' || $schedule->resulting_maintenance_id || $schedule->resulting_ticket_id,
+            422, 'This schedule already has recorded work or a maintenance ticket. Manage that record instead; the schedule is locked.');
+    }
+
     public function deleteSchedule(Request $request, VehicleMaintenanceSchedule $schedule)
+    {
+        return DB::transaction(function () use ($request, $schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->getKey())->lockForUpdate()->firstOrFail();
+            return $this->deleteScheduleLocked($request, $schedule);
+        });
+    }
+
+    private function deleteScheduleLocked(Request $request, VehicleMaintenanceSchedule $schedule)
     {
         // Admin-only — cancelling a plan is a planning decision, same as
         // updateSchedule() above.
         $this->requireAbility($request, 'schedule.delete');
         $this->abortUnlessOwnBarangaySchedule($schedule);
+        $this->assertSchedulePlanEditable($schedule);
 
         $schedule->update(['status' => 'Cancelled']);
         $this->history($schedule->vehicle, 'Maintenance Schedule Cancelled', "Maintenance schedule #{$schedule->schedule_id} was cancelled.", 'vehicle_maintenance_schedules', $schedule->schedule_id, $request);
@@ -3076,9 +3302,18 @@ class FleetController extends Controller
      */
     public function restoreSchedule(Request $request, VehicleMaintenanceSchedule $schedule)
     {
+        return DB::transaction(function () use ($request, $schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->getKey())->lockForUpdate()->firstOrFail();
+            return $this->restoreScheduleLocked($request, $schedule);
+        });
+    }
+
+    private function restoreScheduleLocked(Request $request, VehicleMaintenanceSchedule $schedule)
+    {
         // Admin-only — same reasoning as deleteSchedule()/updateSchedule().
         $this->requireAbility($request, 'schedule.restore');
         $this->abortUnlessOwnBarangaySchedule($schedule);
+        $this->assertSchedulePlanEditable($schedule);
 
         abort_unless(
             $schedule->status === 'Cancelled',
@@ -3096,14 +3331,15 @@ class FleetController extends Controller
             ->exists();
         abort_if($alreadyBooked, 422, 'This vehicle already has an active schedule on that date — edit the date before restoring this one.');
 
-        $schedule->update(['status' => 'Scheduled']);
+        $schedule->update(['status' => 'Pending Approval', 'decline_reason' => null]);
+        $this->notifyAdmins('Maintenance Schedule Restored for Review', "{$request->user()->name} restored schedule #{$schedule->schedule_id}; approval is required.", 'schedule_proposed', $schedule->vehicle->barangay_id, ['schedule_id' => $schedule->schedule_id]);
 
-        $this->history($schedule->vehicle, 'Maintenance Schedule Restored', "Cancelled maintenance schedule #{$schedule->schedule_id} was restored to Scheduled.", 'vehicle_maintenance_schedules', $schedule->schedule_id, $request);
+        $this->history($schedule->vehicle, 'Maintenance Schedule Restored', "Cancelled maintenance schedule #{$schedule->schedule_id} was restored for Admin approval.", 'vehicle_maintenance_schedules', $schedule->schedule_id, $request);
         $this->log($request, 'Restore', 'Vehicle Maintenance Schedule', $schedule->schedule_id, "Restored cancelled schedule #{$schedule->schedule_id}");
 
         // The assignee should know it's back on their plate — same reasoning as
         // the assignment notification in storeSchedule/updateSchedule.
-        if ($schedule->assigned_to) {
+        if ($schedule->status === 'Scheduled' && $schedule->assigned_to) {
             $this->notifyUser(
                 (int) $schedule->assigned_to,
                 'Maintenance Schedule Restored',
@@ -3200,6 +3436,21 @@ class FleetController extends Controller
             default => Vehicle::with('category')->get(),
         };
 
+        $rows->each(function ($row) {
+            $warnings = [];
+            if ($row instanceof Vehicle && (!preg_match('/^\s*(\d+(?:\.\d+)?)/', $row->capacity, $quantity) || (float) $quantity[1] <= 0)) {
+                $warnings[] = 'Invalid capacity: factual correction required';
+            }
+            if ($row instanceof VehicleMaintenanceRecord) {
+                $today = now('Asia/Manila')->toDateString();
+                if (($row->date_completed && substr($row->date_completed, 0, 10) > $today)
+                    || ($row->date_started && substr($row->date_started, 0, 10) > $today && $row->originatingSchedule()->where('status', 'Completed')->exists())) {
+                    $warnings[] = 'Future completed-work date: factual correction required';
+                }
+            }
+            $row->setAttribute('data_quality_warnings', $warnings);
+        });
+
         $this->log($request, 'Generate Report', 'Reports', null, "Generated {$data['report_type']}");
 
         return response()->json([
@@ -3233,11 +3484,16 @@ class FleetController extends Controller
                 'regex:/^(?=.*\d)[A-Za-z0-9]{1,4}(?:[\s-]?[A-Za-z0-9]{1,4}){1,2}$/',
                 Rule::unique('vehicles', 'plate_number')->ignore($vehicle?->vehicle_id, 'vehicle_id'),
             ],
+            'vehicle_domain' => ['sometimes', \Illuminate\Validation\Rule::in([$domain])],
             'category_id' => ['required', 'exists:vehicle_categories,category_id'],
             'brand' => ['required', 'string', 'max:255'],
             'model' => ['required', 'string', 'max:255'],
             'year_model' => ['required', new NumberOnly, 'integer', 'min:1900', 'max:' . now()->addYear()->year],
-            'capacity' => ['required', 'string', 'max:255'],
+            'capacity' => ['required', 'string', 'max:255', function ($attribute, $value, $fail) {
+                if (!preg_match('/^\s*(\d+(?:\.\d+)?)(?:\s*[\p{L}\p{N}\x{00B3}]+)?\s*$/u', $value, $match) || (float) $match[1] <= 0) {
+                    $fail('Capacity must be a positive quantity, for example 5 kg or 10 pax.');
+                }
+            }],
             'acquisition_cost' => ['nullable', 'numeric', 'min:0'],
             'fuel_type' => ['required', 'string', 'max:255'],
             'hull_material' => [$domain === 'Water' ? 'required' : 'nullable', Rule::in(self::HULL_MATERIAL_OPTIONS)],
@@ -3379,14 +3635,14 @@ class FleetController extends Controller
         // vehicle — this runs on every dashboard/vehicle-list request.
         $vehicleIds = $vehicles->pluck('vehicle_id');
         $maintenanceTicketVehicleIds = \App\Models\MaintenanceTicket::whereIn('vehicle_id', $vehicleIds)
-            ->whereNotIn('status', ['Closed', 'Cancelled'])
+            ->whereIn('status', ['Active', 'For Verification'])
             ->pluck('vehicle_id')
             ->flip();
         $activeRecordVehicleIds = VehicleMaintenanceRecord::whereIn('vehicle_id', $vehicleIds)
             ->whereNotIn('progress_status', ['Completed'])
             ->pluck('vehicle_id')
             ->flip();
-        $latestIssues = VehicleIssueReport::whereIn('vehicle_id', $vehicleIds)
+        $latestIssues = VehicleIssueReport::with('maintenanceTicket:maintenance_tickets.ticket_id,maintenance_tickets.issue_report_id,maintenance_tickets.status')->whereIn('vehicle_id', $vehicleIds)
             ->orderByDesc('issue_report_id')
             ->get()
             ->unique('vehicle_id')
@@ -3403,14 +3659,14 @@ class FleetController extends Controller
             $latestIssue = $latestIssues->get($vehicle->vehicle_id);
 
             if ($latestIssue) {
-                if ($latestIssue->status === 'In Maintenance') {
+                if ($latestIssue->status === 'In Maintenance' && ($hasActiveMaintenance || !$latestIssue->maintenanceTicket)) {
                     if ($vehicle->status !== 'Under Maintenance' || $vehicle->condition !== 'Needs Repair') {
                         $vehicle->update([
                             'status' => 'Under Maintenance',
                             'condition' => 'Needs Repair',
                         ]);
                     }
-                } elseif (in_array($latestIssue->status, ['Pending', 'Under Review'], true)) {
+                } elseif (in_array($latestIssue->status, ['Pending', 'Under Review'], true) || ($latestIssue->status === 'In Maintenance' && $latestIssue->maintenanceTicket)) {
                     if (!$hasActiveMaintenance) {
                         if ($vehicle->status === 'Under Maintenance' || $vehicle->condition !== 'Needs Inspection') {
                             $vehicle->update([

@@ -2,12 +2,15 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\HasBarangayNumber;
+
 use App\Models\Concerns\ScopedThroughVehicle;
 use Illuminate\Database\Eloquent\Model;
 
 class MaintenanceTicket extends Model
 {
     use ScopedThroughVehicle;
+    use HasBarangayNumber;
 
     protected $primaryKey = 'ticket_id';
 
@@ -18,7 +21,16 @@ class MaintenanceTicket extends Model
         return sprintf('MT-%04d — %s — %s', $ticketId, $vehicleName, $summary);
     }
 
+    public function originatingSchedule()
+    {
+        return $this->hasOne(VehicleMaintenanceSchedule::class, 'resulting_ticket_id', 'ticket_id');
+    }
+
     protected $fillable = [
+        'correction_reason',
+        'correction_requested_at',
+        'decision_history',
+        'decision_revision',
         'vehicle_id',
         'issue_report_id',
         'created_by',
@@ -46,6 +58,9 @@ class MaintenanceTicket extends Model
     ];
 
     protected $casts = [
+        'correction_requested_at' => 'datetime',
+        'decision_history' => 'array',
+        'decision_revision' => 'integer',
         'assigned_at'         => 'datetime',
         'down_since'          => 'datetime',
         'inspected_at'        => 'datetime',

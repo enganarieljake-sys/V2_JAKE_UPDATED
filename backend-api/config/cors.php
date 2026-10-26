@@ -5,13 +5,11 @@ return [
 
     'allowed_methods' => ['*'],
 
-    // Local Vite can run on a project-specific port. Keep the development
-    // origins explicit so browser requests are not rejected as a network
-    // error when the frontend is served on 5713.
     'allowed_origins' => [
-        env('FRONTEND_URL', 'http://localhost:5713'),
-        'http://127.0.0.1:5713',
+        env('FRONTEND_URL', 'http://localhost:5173'),
+        // Local Vite can also run on port 5713; allow it so requests are not rejected.
         'http://localhost:5713',
+        'http://127.0.0.1:5713',
     ],
 
     'allowed_origins_patterns' => [],
@@ -20,7 +18,7 @@ return [
 
     'exposed_headers' => [],
 
-    'max_age' => 0,
+    'max_age' => 7200,
 
     'supports_credentials' => false,
 ];

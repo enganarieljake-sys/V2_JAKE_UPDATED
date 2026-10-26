@@ -2,10 +2,13 @@
 
 namespace Tests\Feature;
 
+use App\Mail\AccountMail;
+use App\Mail\ConcernReplyMail;
 use App\Models\ActivityLog;
 use App\Models\ConcernReport;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Mail;
 use Laravel\Sanctum\Sanctum;
 use PHPUnit\Framework\Attributes\Test;
 use Tests\TestCase;
@@ -21,6 +24,43 @@ use Tests\TestCase;
 class SuperAdminControllerTest extends TestCase
 {
     use RefreshDatabase;
+
+    #[Test]
+    public function barangay_management_excludes_reference_only_rows_and_batches_admin_counts(): void
+    {
+        $province = \App\Models\Province::create(['code' => 'TEST', 'name' => 'Test Province']);
+        $city = \App\Models\City::create(['province_id' => $province->id, 'code' => 'TESTCITY', 'name' => 'Test City']);
+        $reference = \App\Models\Barangay::create(['city_id' => $city->id, 'name' => 'Reference only', 'psgc_code' => '0100000001']);
+        $tenant = \App\Models\Barangay::create(['city_id' => $city->id, 'name' => 'Registered', 'psgc_code' => '0100000002', 'boundary' => ['type' => 'Polygon', 'coordinates' => [[[0, 0], [1, 0], [1, 1], [0, 0]]]]]);
+        $provisioned = \App\Models\Barangay::create(['city_id' => $city->id, 'name' => 'Code provisioned', 'psgc_code' => '0100000003', 'boundary' => ['type' => 'Polygon', 'coordinates' => [[[0, 0], [1, 0], [1, 1], [0, 0]]]]]);
+        $seededCodeOnly = \App\Models\Barangay::create(['city_id' => $city->id, 'name' => 'Seeded code only', 'psgc_code' => '0100000004']);
+        $manual = \App\Models\Barangay::create(['city_id' => $city->id, 'name' => 'Manually added']);
+        \App\Models\RegistrationSetting::for($seededCodeOnly->id);
+        User::factory()->create(['barangay_id' => $tenant->id, 'role' => 'Custodian', 'roles' => ['Custodian', 'Admin'], 'is_active' => true]);
+        User::factory()->create(['barangay_id' => $tenant->id, 'role' => 'Admin', 'roles' => ['Admin'], 'is_active' => false]);
+        $superAdmin = User::factory()->create(['role' => 'Super Admin', 'roles' => ['Super Admin']]);
+        Sanctum::actingAs($superAdmin, ['*']);
+        // Issuing a code through the platform onboards the barangay; a code
+        // row created any other way (e.g. by a seeder) does not.
+        $this->getJson("/api/superadmin/barangays/{$provisioned->id}/registration-code")->assertOk();
+
+        \Illuminate\Support\Facades\DB::enableQueryLog();
+        $rows = collect($this->getJson('/api/superadmin/barangays')->assertOk()->json());
+        $queryCount = count(\Illuminate\Support\Facades\DB::getQueryLog());
+        \Illuminate\Support\Facades\DB::disableQueryLog();
+        $this->assertEqualsCanonicalizing([$tenant->id, $provisioned->id, $manual->id], $rows->pluck('id')->all());
+        $this->assertNotContains($reference->id, $rows->pluck('id')->all());
+        $this->assertNotContains($seededCodeOnly->id, $rows->pluck('id')->all());
+        $registered = $rows->firstWhere('id', $tenant->id);
+        $this->assertSame(2, $registered['staff_count']);
+        $this->assertTrue($registered['has_active_admin']);
+        $this->assertTrue($registered['sole_active_admin']);
+        $this->assertTrue($registered['has_boundary']);
+        $this->assertArrayNotHasKey('boundary', $registered);
+        $this->assertFalse($rows->firstWhere('id', $manual->id)['has_boundary']);
+        $this->assertTrue($rows->firstWhere('id', $provisioned->id)['has_registration_code']);
+        $this->assertLessThanOrEqual(5, $queryCount, 'Admin counts must not issue a query per barangay.');
+    }
 
     #[Test]
     public function super_admin_activity_log_excludes_fleet_detail_entries(): void
@@ -67,7 +107,7 @@ class SuperAdminControllerTest extends TestCase
     }
 
     #[Test]
-    public function only_super_admin_can_delete_a_concern_report(): void
+    public function concern_reports_cannot_be_managed_by_tenant_admins(): void
     {
         $admin = User::factory()->create(['role' => 'Admin', 'roles' => ['Admin']]);
         $report = ConcernReport::create([
@@ -77,12 +117,16 @@ class SuperAdminControllerTest extends TestCase
         ]);
 
         Sanctum::actingAs($admin, ['*']);
-        $this->deleteJson("/api/superadmin/concern-reports/{$report->id}")->assertStatus(403);
+        $this->getJson('/api/superadmin/concern-reports')->assertForbidden();
+        $this->putJson("/api/superadmin/concern-reports/{$report->id}/resolve")->assertForbidden();
+        $this->putJson("/api/superadmin/concern-reports/{$report->id}/reopen")->assertForbidden();
+        $this->deleteJson("/api/superadmin/concern-reports/{$report->id}")->assertForbidden();
+        $this->putJson("/api/superadmin/concern-reports/{$report->id}/restore")->assertForbidden();
         $this->assertDatabaseHas('concern_reports', ['id' => $report->id]);
     }
 
     #[Test]
-    public function super_admin_can_delete_a_concern_report_and_it_is_actually_removed(): void
+    public function super_admin_can_review_resolve_reopen_and_delete_existing_concerns(): void
     {
         $superAdmin = User::factory()->create(['role' => 'Super Admin', 'roles' => ['Super Admin']]);
         $report = ConcernReport::create([
@@ -92,16 +136,97 @@ class SuperAdminControllerTest extends TestCase
         ]);
 
         Sanctum::actingAs($superAdmin, ['*']);
-        $this->deleteJson("/api/superadmin/concern-reports/{$report->id}")->assertOk();
+        $this->getJson('/api/superadmin/concern-reports')->assertOk()->assertJsonFragment(['id' => $report->id]);
+        $this->putJson("/api/superadmin/concern-reports/{$report->id}/resolve")->assertOk()->assertJsonPath('status', 'Resolved');
+        $this->assertDatabaseHas('concern_reports', ['id' => $report->id, 'resolved_by' => $superAdmin->id]);
+        $this->assertNotNull($report->fresh()->resolved_at);
+        $this->putJson("/api/superadmin/concern-reports/{$report->id}/reopen")->assertOk()->assertJsonPath('status', 'Open');
+        $this->assertDatabaseHas('concern_reports', ['id' => $report->id, 'status' => 'Open']);
+        $this->assertNull($report->fresh()->resolved_by);
+        $this->assertNull($report->fresh()->resolved_at);
+        $this->deleteJson("/api/superadmin/concern-reports/{$report->id}")->assertOk()->assertJsonPath('id', $report->id);
+        // Deleted reports stay in Concern History and can be restored as open.
+        $this->assertSoftDeleted('concern_reports', ['id' => $report->id]);
+        $this->getJson('/api/superadmin/concern-reports')->assertOk()->assertJsonFragment(['id' => $report->id]);
+        $this->putJson("/api/superadmin/concern-reports/{$report->id}/restore")->assertOk()->assertJsonPath('status', 'Open')->assertJsonPath('deleted_at', null);
+        $this->assertNotSoftDeleted('concern_reports', ['id' => $report->id]);
+        $this->putJson("/api/superadmin/concern-reports/{$report->id}/restore")->assertNotFound();
+    }
 
-        $this->assertDatabaseMissing('concern_reports', ['id' => $report->id]);
+    #[Test]
+    public function public_can_submit_concerns_but_cannot_read_the_inbox(): void
+    {
+        $this->postJson('/api/concern-reports', ['concern_type' => 'Other', 'description' => 'Unable to reach our administrator'])->assertCreated();
+        $this->assertDatabaseHas('concern_reports', ['description' => 'Unable to reach our administrator', 'status' => 'Open']);
+        $this->getJson('/api/superadmin/concern-reports')->assertUnauthorized();
+        $this->postJson('/api/concern-reports', ['concern_type' => 'Invalid'])->assertUnprocessable()->assertJsonValidationErrors(['concern_type']);
+        // Only "Other" needs a description; the named types explain themselves and drop any sent text.
+        $this->postJson('/api/concern-reports', ['concern_type' => 'Other'])->assertUnprocessable()->assertJsonValidationErrors(['description']);
+        $this->postJson('/api/concern-reports', ['concern_type' => 'Suspected Fake Staff', 'description' => 'ignored'])->assertCreated();
+        $this->assertDatabaseHas('concern_reports', ['concern_type' => 'Suspected Fake Staff', 'description' => null]);
+    }
+
+    #[Test]
+    public function super_admin_emails_the_reporter_once_per_stage(): void
+    {
+        Mail::fake();
+        $superAdmin = User::factory()->create(['role' => 'Super Admin', 'roles' => ['Super Admin']]);
+        $report = ConcernReport::create(['concern_type' => 'Other', 'description' => 'Help', 'status' => 'Open', 'reporter_contact' => 'reporter@example.test']);
+        $phoneOnly = ConcernReport::create(['concern_type' => 'Other', 'description' => 'Help', 'status' => 'Open', 'reporter_contact' => '09171234567']);
+        Sanctum::actingAs($superAdmin, ['*']);
+        $email = fn (ConcernReport $r, string $kind) => $this->postJson("/api/superadmin/concern-reports/{$r->id}/email", ['kind' => $kind, 'subject' => 'Update', 'message' => 'We are on it.']);
+
+        $email($report, 'acknowledge')->assertOk()->assertJsonPath('report.id', $report->id);
+        $this->assertNotNull($report->fresh()->acknowledged_email_at);
+        $email($report, 'acknowledge')->assertStatus(409);
+        $email($report, 'resolved')->assertOk();
+        $email($report, 'resolved')->assertStatus(409);
+        $email($phoneOnly, 'acknowledge')->assertUnprocessable();
+
+        Mail::assertSent(ConcernReplyMail::class, 2);
+        Mail::assertSent(ConcernReplyMail::class, fn (ConcernReplyMail $mail) => $mail->hasTo('reporter@example.test'));
+    }
+
+    #[Test]
+    public function rejecting_a_registration_emails_the_reason_before_deleting_it(): void
+    {
+        Mail::fake();
+        $pending = User::factory()->create(['name' => 'Juan Dela Cruz', 'role' => 'Admin', 'roles' => ['Admin'], 'is_active' => false, 'approved_at' => null]);
+        Sanctum::actingAs(User::factory()->create(['role' => 'Super Admin', 'roles' => ['Super Admin']]), ['*']);
+
+        // A reason is required, and nothing is deleted without it.
+        $this->deleteJson("/api/superadmin/users/{$pending->id}/reject")->assertUnprocessable()->assertJsonValidationErrors(['reason', 'subject', 'message']);
+        $this->assertNotNull($pending->fresh());
+
+        $this->deleteJson("/api/superadmin/users/{$pending->id}/reject", ['reason' => 'We could not confirm your appointment.', 'subject' => 'Your VMS registration was not approved', 'message' => 'We are sorry.'])->assertOk();
+        $this->assertNull($pending->fresh());
+        Mail::assertSent(AccountMail::class, fn (AccountMail $mail) => $mail->hasTo($pending->email) && $mail->template === 'rejected' && $mail->data['reason'] === 'We could not confirm your appointment.');
+    }
+
+    #[Test]
+    public function only_a_super_admin_can_email_a_reporter(): void
+    {
+        Mail::fake();
+        $report = ConcernReport::create(['concern_type' => 'Other', 'description' => 'Help', 'status' => 'Open', 'reporter_contact' => 'reporter@example.test']);
+        Sanctum::actingAs(User::factory()->create(['role' => 'Admin', 'roles' => ['Admin']]), ['*']);
+        $this->postJson("/api/superadmin/concern-reports/{$report->id}/email", ['kind' => 'acknowledge', 'subject' => 'S', 'message' => 'M'])->assertForbidden();
+        Mail::assertNothingSent();
+    }
+
+    #[Test]
+    public function public_concern_submissions_are_rate_limited(): void
+    {
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $this->postJson('/api/concern-reports', ['concern_type' => 'Other', 'description' => 'A concern'])->assertCreated();
+        }
+        $this->postJson('/api/concern-reports', ['concern_type' => 'Other', 'description' => 'Another concern'])->assertStatus(429);
     }
 
     #[Test]
     public function pending_approvals_lists_only_accounts_never_approved(): void
     {
         $superAdmin = User::factory()->create(['role' => 'Super Admin', 'roles' => ['Super Admin']]);
-        $pending = User::factory()->create(['role' => 'Admin', 'roles' => ['Admin'], 'approved_at' => null]);
+        $pending = User::factory()->create(['role' => 'Admin', 'roles' => ['Admin'], 'approved_at' => null, 'is_active' => false]);
         $approved = User::factory()->create(['role' => 'Custodian', 'roles' => ['Custodian'], 'approved_at' => now()]);
 
         Sanctum::actingAs($superAdmin, ['*']);
@@ -116,10 +241,10 @@ class SuperAdminControllerTest extends TestCase
     public function rejecting_a_never_approved_registration_deletes_the_account(): void
     {
         $superAdmin = User::factory()->create(['role' => 'Super Admin', 'roles' => ['Super Admin']]);
-        $pending = User::factory()->create(['role' => 'Admin', 'roles' => ['Admin'], 'approved_at' => null]);
+        $pending = User::factory()->create(['role' => 'Admin', 'roles' => ['Admin'], 'approved_at' => null, 'is_active' => false]);
 
         Sanctum::actingAs($superAdmin, ['*']);
-        $this->deleteJson("/api/superadmin/users/{$pending->id}/reject")->assertOk();
+        $this->deleteJson("/api/superadmin/users/{$pending->id}/reject", ['reason' => 'Could not verify', 'subject' => 'Not approved', 'message' => 'Sorry.'])->assertOk();
 
         $this->assertDatabaseMissing('users', ['id' => $pending->id]);
     }

@@ -49,9 +49,16 @@ class ConvertDueSchedulesToTickets extends Command
 
     public function handle(): int
     {
+        $localNow = now('Asia/Manila');
         $due = VehicleMaintenanceSchedule::where('status', 'Scheduled')
             ->whereNull('resulting_ticket_id')
-            ->whereDate('scheduled_date', '<=', now()->toDateString())
+            ->where(function ($query) use ($localNow) {
+                $query->whereDate('scheduled_date', '<', $localNow->toDateString())
+                    ->orWhere(function ($today) use ($localNow) {
+                        $today->whereDate('scheduled_date', $localNow->toDateString())
+                            ->where(fn ($time) => $time->whereNull('scheduled_time')->orWhere('scheduled_time', '<=', $localNow->format('H:i:s')));
+                    });
+            })
             ->with('vehicle')
             ->get();
 
@@ -73,6 +80,18 @@ class ConvertDueSchedulesToTickets extends Command
 
     private function convertOne(VehicleMaintenanceSchedule $schedule): bool
     {
+        return DB::transaction(function () use ($schedule) {
+            $schedule = VehicleMaintenanceSchedule::whereKey($schedule->schedule_id)->lockForUpdate()->firstOrFail();
+            if ($schedule->status !== 'Scheduled' || $schedule->resulting_ticket_id || $schedule->resulting_maintenance_id) {
+                return false;
+            }
+            $schedule->setRelation('vehicle', \App\Models\Vehicle::whereKey($schedule->vehicle_id)->lockForUpdate()->first());
+            return $this->createProposal($schedule);
+        });
+    }
+
+    private function createProposal(VehicleMaintenanceSchedule $schedule): bool
+    {
         $vehicle = $schedule->vehicle;
 
         if (!$vehicle || in_array($vehicle->status, ['Inactive', 'Decommissioned'], true)) {
@@ -85,7 +104,7 @@ class ConvertDueSchedulesToTickets extends Command
         // Custodian in the same barangay for an older schedule created
         // before that rule, rather than failing the whole run over it.
         $custodian = User::find($schedule->created_by);
-        if (!$custodian || !$custodian->hasRole('Custodian') || !$custodian->is_active) {
+        if (!$custodian || !$custodian->hasRole('Custodian') || !$custodian->is_active || $custodian->barangay_id !== $vehicle->barangay_id) {
             $custodian = User::where('barangay_id', $vehicle->barangay_id)
                 ->havingRole('Custodian')
                 ->where('is_active', true)
@@ -113,7 +132,7 @@ class ConvertDueSchedulesToTickets extends Command
         $normalizedTitle = $this->normalizeTicketTitle($issueSummary);
         $duplicate = MaintenanceTicket::where('vehicle_id', $vehicle->vehicle_id)
             ->whereNotIn('status', ['Closed', 'Cancelled'])
-            ->get(['ticket_id', 'ticket_title'])
+            ->get(['ticket_id', 'barangay_number', 'ticket_title'])
             ->first(fn ($t) => $this->normalizeSummaryForVehicle($t->ticket_title, $vehicle->vehicle_name) === $normalizedTitle);
 
         if ($duplicate) {
@@ -133,13 +152,13 @@ class ConvertDueSchedulesToTickets extends Command
                 'assigned_custodian_id' => $custodian->id,
                 'assigned_at' => now(),
             ]);
-            $ticket->update(['ticket_title' => MaintenanceTicket::composeTitle($ticket->ticket_id, $vehicle->vehicle_name, $issueSummary)]);
+            $ticket->update(['ticket_title' => MaintenanceTicket::composeTitle($ticket->barangay_number ?? $ticket->ticket_id, $vehicle->vehicle_name, $issueSummary)]);
 
             // A rider for Admin to review, same as a human proposal's
             // suggested_mechanic_id — not a real dispatch. approveTicket()
             // is what actually assigns them, exactly like any other proposal.
             $suggestedMechanic = $schedule->assigned_to
-                ? User::find($schedule->assigned_to)
+                ? User::where('barangay_id', $vehicle->barangay_id)->where('is_active', true)->havingRole('Maintenance Personnel')->find($schedule->assigned_to)
                 : null;
 
             // Final senior system review (2026-10-05, §3) — a preventive
@@ -168,14 +187,14 @@ class ConvertDueSchedulesToTickets extends Command
                 'action' => 'Auto-Propose Ticket',
                 'module' => 'Maintenance Tickets',
                 'affected_record_id' => (string) $ticket->ticket_id,
-                'details' => "Ticket #{$ticket->ticket_id} auto-proposed (Pending Approval) from due Maintenance Schedule #{$schedule->schedule_id} ({$vehicle->vehicle_name}) — awaiting Admin review.",
+                'details' => "Ticket #{$ticket->display_number} auto-proposed (Pending Approval) from due Maintenance Schedule #{$schedule->schedule_id} ({$vehicle->vehicle_name}) — awaiting Admin review.",
                 'barangay_id' => $vehicle->barangay_id,
             ]);
 
             Notification::create([
                 'user_id' => $custodian->id,
                 'title' => 'Scheduled Maintenance Proposed as a Ticket',
-                'message' => "Your scheduled {$schedule->maintenance_type} for {$vehicle->vehicle_name} was due, so Ticket #{$ticket->ticket_id} was proposed for it and is awaiting Admin review.",
+                'message' => "Your scheduled {$schedule->maintenance_type} for {$vehicle->vehicle_name} was due, so Ticket #{$ticket->display_number} was proposed for it and is awaiting Admin review.",
                 'type' => 'schedule_due_ticket_created',
                 'ticket_id' => $ticket->ticket_id,
             ]);
@@ -184,7 +203,7 @@ class ConvertDueSchedulesToTickets extends Command
                 Notification::create([
                     'user_id' => $admin->id,
                     'title' => 'New Ticket Proposal Awaiting Review',
-                    'message' => "A due Maintenance Schedule auto-proposed Ticket #{$ticket->ticket_id} — \"{$schedule->maintenance_type}\" for {$vehicle->vehicle_name}. Review, edit if needed, then approve or decline.",
+                    'message' => "A due Maintenance Schedule auto-proposed Ticket #{$ticket->display_number} — \"{$schedule->maintenance_type}\" for {$vehicle->vehicle_name}. Review, edit if needed, then approve or decline.",
                     'type' => 'ticket_proposed',
                     'ticket_id' => $ticket->ticket_id,
                 ]);

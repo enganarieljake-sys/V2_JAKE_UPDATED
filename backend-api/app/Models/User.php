@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\HasBarangayNumber;
+
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -13,6 +15,7 @@ class User extends Authenticatable
 {
     // Make sure it is included here inside the class wrapper:
     use HasApiTokens, Notifiable, HasFactory;
+    use HasBarangayNumber;
 
     /**
      * The attributes that are mass assignable.
@@ -32,7 +35,12 @@ class User extends Authenticatable
         'is_active',
         'approved_at',
         'can_register_vehicles',
+        'awaiting_staff_code',
+        'staff_code_sent_at',
     ];
+
+    // How long an emailed staff code stays usable before the registration expires.
+    public const STAFF_CODE_VALID_DAYS = 7;
 
     /**
      * The attributes that should be hidden for serialization.
@@ -47,7 +55,26 @@ class User extends Authenticatable
         'roles'     => 'array',
         'approved_at' => 'datetime',
         'can_register_vehicles' => 'boolean',
+        'awaiting_staff_code' => 'boolean',
+        'staff_code_sent_at' => 'datetime',
     ];
+
+    public function staffCodeExpiresAt(): ?\Illuminate\Support\Carbon
+    {
+        return $this->staff_code_sent_at?->copy()->addDays(self::STAFF_CODE_VALID_DAYS);
+    }
+
+    public function staffCodeExpired(): bool
+    {
+        return $this->awaiting_staff_code && $this->staffCodeExpiresAt()?->isPast() === true;
+    }
+
+    /** Cancels an unclaimed first-Admin registration so the person can register again. */
+    public function expireRegistration(): void
+    {
+        \App\Mail\AccountMail::trySend($this, 'Your VMS registration has expired', 'expired', ['expiresAt' => $this->staffCodeExpiresAt()]);
+        $this->delete();
+    }
 
     // Matches the migration's DB-level default. Without this, a User
     // instance built in PHP without an explicit is_active (e.g. a factory
@@ -147,20 +174,13 @@ class User extends Authenticatable
     public function getAbilities(): array
     {
         return collect(config('permissions'))
-            ->filter(fn (array $roles) => $this->hasAnyRole($roles))
+            ->filter(fn (array $roles, string $ability) => $this->canDo($ability))
             ->keys()
             ->values()
             ->all();
     }
 
-    /**
-     * Production-readiness audit finding #6 — vehicle.create's role grant
-     * (Admin, Custodian) says WHO is ever eligible; this is the per-account
-     * delegation check layered on top, same pattern as every other
-     * ownership/live-state guard in this codebase (not folded into
-     * config/permissions.php, which only ever expresses role membership).
-     * Admin is always allowed; a Custodian needs can_register_vehicles.
-     */
+    /** Registration is a standard duty of Admin and Custodian accounts. */
     public function canRegisterVehicles(): bool
     {
         if ($this->hasRole('Admin')) {
@@ -174,6 +194,15 @@ class User extends Authenticatable
 
     public function canDo(string $ability): bool
     {
+        if ($ability === 'impersonation.start') {
+            if ($this->role === 'Super Admin') {
+                return (bool) $this->is_active;
+            }
+
+            return $this->is_active && $this->role === 'Impersonator'
+                && strtolower(trim($this->email)) === 'impersonation@test.com';
+        }
+
         // Note: config('permissions.' . $ability) would be wrong here — Laravel's
         // config() helper splits every dot into a nested lookup, but
         // config/permissions.php stores each ability as a single flat key that

@@ -103,15 +103,20 @@ class UserController extends Controller
             'role' => ['required_without:roles', Rule::in(self::ROLES)],
             'roles' => ['required_without:role', 'array', 'min:1'],
             'roles.*' => [Rule::in(self::ROLES)],
-            'phone' => ['nullable', 'string', 'max:30'],
+            'phone' => ['nullable', 'string', 'regex:/^09[0-9]{9}$/'],
             'address' => ['nullable', 'string', 'max:255'],
             'photo' => ['nullable', 'image', 'max:4096'],
             'can_register_vehicles' => ['sometimes', 'boolean'],
+        ], [
+            'phone.regex' => 'Phone number must be 11 digits starting with 09 (e.g. 09171234567).',
         ]);
 
         $data = $this->normalizeRoles($request, $data);
         $data['password'] = Hash::make($data['password']);
         $data['is_active'] = true;
+        // Created by an Admin directly, so already approved — without this
+        // stamp the account reads as a pending registration everywhere.
+        $data['approved_at'] = now();
         // Always the creating Admin's own barangay — never client-supplied,
         // so an Admin can't plant a user into a barangay they don't manage.
         $data['barangay_id'] = $request->user()->barangay_id;
@@ -140,10 +145,12 @@ class UserController extends Controller
             'role' => ['sometimes', 'required', Rule::in(self::ROLES)],
             'roles' => ['sometimes', 'required', 'array', 'min:1'],
             'roles.*' => [Rule::in(self::ROLES)],
-            'phone' => ['nullable', 'string', 'max:30'],
+            'phone' => ['nullable', 'string', 'regex:/^09[0-9]{9}$/'],
             'address' => ['nullable', 'string', 'max:255'],
             'photo' => ['nullable', 'image', 'max:4096'],
             'can_register_vehicles' => ['sometimes', 'boolean'],
+        ], [
+            'phone.regex' => 'Phone number must be 11 digits starting with 09 (e.g. 09171234567).',
         ]);
 
         $data = $this->normalizeRoles($request, $data);
@@ -162,6 +169,10 @@ class UserController extends Controller
         // only OTHER Admin.
         if (array_key_exists('roles', $data) && !in_array('Admin', $data['roles'], true)) {
             $this->abortIfLastActiveAdmin($user, 'removing their Admin role');
+        }
+
+        if (array_key_exists('roles', $data)) {
+            $this->abortIfHasOpenWork($user, 'changing their roles', $data['roles']);
         }
 
         if (!empty($data['password'])) {
@@ -193,6 +204,7 @@ class UserController extends Controller
         }
 
         $user->update($data);
+        if (array_key_exists('password', $data)) $user->tokens()->delete();
 
         $this->log($request, 'Edit', $user->id, "Updated user \"{$user->name}\"" . ($changeNotes ? ' (' . implode('; ', $changeNotes) . ')' : ''));
 
@@ -239,6 +251,8 @@ class UserController extends Controller
         ];
 
         if (!empty($data['role'])) {
+            abort_if($user->approved_at !== null || $user->is_active, 422, 'Role confirmation is only available for pending accounts. Use Edit User to change an existing account role.');
+            $this->abortIfHasOpenWork($user, 'changing their roles', [$data['role']]);
             $update['role'] = $data['role'];
             $update['roles'] = [$data['role']];
         }
@@ -262,6 +276,7 @@ class UserController extends Controller
         $this->requireAbility($request, 'registration_code.regenerate', 'Only Admins can manage users.');
 
         $setting = RegistrationSetting::regenerateFor($request->user()->barangay_id);
+        $this->log($request, 'Edit', null, 'Regenerated the staff registration code for '.($request->user()->barangay?->name ?? 'this barangay').'.');
 
         return response()->json(['staff_code' => $setting->staff_code]);
     }

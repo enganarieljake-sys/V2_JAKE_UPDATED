@@ -1,8 +1,10 @@
+import SearchableSelect from './SearchableSelect';
 import './RoleDashboard.css';
 import { useEffect, useState } from 'react';
 import api from '../api/axios';
 import Icon from './Icon';
 import { DonutChart, HorizontalBarChart } from './charts';
+import { didRepairWorkOn } from '../utils/ticketVerification';
 
 const roleCopy = {
   Admin: ['Administrator Dashboard', 'Review pending decisions and monitor fleet maintenance.'],
@@ -54,7 +56,10 @@ export default function RoleDashboard({ data, user, basePath, onNavigate, onGoTo
       if (!cancelled) { setFeed({ tickets: tickets.data, schedules: schedules.data, issues: issues.data, role }); setError(''); }
     }).catch(() => { if (!cancelled) setError('Assignments could not be loaded. Retry or open the relevant module.'); });
     return () => { cancelled = true; };
-  }, [user.id, role, retry, data]);
+    // Not keyed on `data`: the dashboard summary is re-polled every 15s and on
+    // window focus, and refetching the full ticket/schedule lists each time
+    // flooded the single-threaded dev server and delayed module switches.
+  }, [user.id, role, retry]);
 
   if (!data) return <p className="empty-state">Dashboard data is not available yet.</p>;
   const pending = !feed || feed.role !== role;
@@ -68,7 +73,7 @@ export default function RoleDashboard({ data, user, basePath, onNavigate, onGoTo
   const mySchedules = schedules.filter((s) => sameId(s.assigned_to, user.id) && s.status === 'Scheduled' && !s.resulting_ticket_id);
   const overdueSchedules = schedules.filter(isScheduleOverdue);
   const myOverdue = mySchedules.filter(isScheduleOverdue);
-  const verifications = tickets.filter((t) => t.status === 'For Verification' && sameId(t.assigned_custodian_id, user.id));
+  const verifications = tickets.filter((t) => t.status === 'For Verification' && sameId(t.assigned_custodian_id, user.id) && !didRepairWorkOn(t, user.id));
   const readiness = data.readiness ?? [];
   const watch = data.readiness_watch ?? [];
   const openIssues = issues.filter((i) => ['Pending', 'Under Review'].includes(i.status) && !i.maintenance_ticket);
@@ -126,7 +131,7 @@ export default function RoleDashboard({ data, user, basePath, onNavigate, onGoTo
   const attentionChart = <DashboardBarCard title="Readiness Attention by Vehicle Type" description="Vehicles without verified-ready status. Red indicates a type with no verified-ready coverage; amber indicates partial coverage." rows={attentionRows} unit="Vehicles" emptyMessage="No readiness counts available yet.">{readiness.length > 0 && readinessDetails}</DashboardBarCard>;
   const scheduleChart = <DashboardBarCard title="My Maintenance Schedule" description="Your scheduled assignments by due date, using Philippine time. Upcoming excludes today." rows={scheduleRows} unit="Schedules" loading={loading} error={error} emptyMessage={mySchedules.length ? 'No dated assignments to chart yet.' : 'No assigned maintenance schedules.'} />;
   return <div className="focus-dashboard role-dashboard">
-    <header className="focus-heading focus-branded-heading"><div><h2>{roleCopy[role][0]}</h2><p>{roleCopy[role][1]}</p></div>{roles.length > 1 && <label>Responsibility<select aria-label="Dashboard responsibility" value={role} onChange={(e) => setSelectedRole(e.target.value)}>{roles.map((r) => <option key={r}>{r}</option>)}</select></label>}</header>
+    <header className="focus-heading focus-branded-heading"><div><h2>{roleCopy[role][0]}</h2><p>{roleCopy[role][1]}</p></div>{roles.length > 1 && <label>Responsibility<SearchableSelect aria-label="Dashboard responsibility" value={role} onChange={(e) => setSelectedRole(e.target.value)}>{roles.map((r) => <option key={r}>{r}</option>)}</SearchableSelect></label>}</header>
     {error && <div role="alert" className="focus-error">{error}<button type="button" onClick={() => setRetry((n) => n + 1)}>Retry</button></div>}
     <div className="focus-kpis" style={{ '--kpi-count': kpis.length }}>{kpis.map((k) => <button type="button" key={k.label} onClick={k.open}><span className="focus-kpi-icon"><Icon name={k.icon} size={19} /></span><span>{k.label}<strong>{k.value}</strong>{k.detail && <small>{k.detail}</small>}</span><Icon name="chevronRight" size={14} /></button>)}</div>
     <div className={admin ? 'focus-columns focus-columns-even' : 'focus-columns'}>

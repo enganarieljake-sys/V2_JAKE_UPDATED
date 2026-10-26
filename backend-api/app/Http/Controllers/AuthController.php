@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use App\Http\Controllers\Concerns\UploadsImages;
+use App\Mail\AccountMail;
 use App\Models\ActivityLog;
 use App\Models\Barangay;
 use App\Models\RegistrationSetting;
@@ -17,27 +18,11 @@ class AuthController extends Controller
     use UploadsImages;
 
     /**
-     * Public self-registration. Residents/staff sign up naming their own
-     * barangay, but the account is created inactive — an Admin must approve
-     * (activate) it via the existing Users management screen before it can
-     * log in, the same gate `login()` already enforces for any deactivated
-     * account.
-     *
-     * Barangays are independent tenants (see BelongsToBarangay/
-     * ScopedThroughVehicle) — every barangay gets its own bootstrap, not
-     * just the very first account system-wide:
-     * - The first account to register under a GIVEN barangay becomes that
-     *   barangay's Admin immediately, active, no approval needed — there's
-     *   nobody else there yet who could review them. This can happen once
-     *   per barangay, whenever it happens to get its first registrant.
-     * - Everyone registering under a barangay — first person included —
-     *   must supply THAT barangay's own Staff Registration Code. Without
-     *   this, anyone could just claim to be "first" for a real barangay
-     *   whose Admin seat happens to still be empty and become its Admin
-     *   uncontested. The code for every real, pre-seeded barangay is
-     *   generated ahead of time (see BarangaySeeder) and handed to that
-     *   barangay's office outside the app, so only someone who actually
-     *   went through that office can ever complete this step.
+     * Register against a preloaded PSGC barangay ID. The barangay must belong
+     * to the selected city; free-text barangay creation is not a public flow.
+     * Staff need the barangay's staff code and await Admin approval; a first
+     * Administrator registers without one and activates with the code a
+     * Super Admin emails them (activateWithStaffCode).
      */
     public function register(Request $request)
     {
@@ -50,21 +35,22 @@ class AuthController extends Controller
             // PH mobile format: 09 + 9 digits = 11 digits total.
             'phone' => ['required', 'regex:/^09[0-9]{9}$/'],
             'address' => ['required', 'string', 'max:255'],
-            'city_id' => ['required', 'exists:cities,id'],
-            // Only cities with a real barangay list (Mandaue City today) get
-            // a dropdown (barangay_id); every other city falls back to free
-            // text (barangay_name) — exactly one of the two is required.
+            'city_id' => ['required', 'exists:cities,id', function ($attribute, $value, $fail) use ($request) {
+                if ($request->filled('province_id') && (int) \App\Models\City::find($value)?->province_id !== (int) $request->input('province_id')) {
+                    $fail('Selected city does not belong to the selected province.');
+                }
+            }],
+            'province_id' => ['nullable', 'exists:provinces,id'],
             'barangay_id' => [
-                'nullable',
-                'required_without:barangay_name',
-                'exists:barangays,id',
+                'required',
+                Rule::exists('barangays', 'id')->whereNotNull('psgc_code'),
                 function ($attribute, $value, $fail) use ($request) {
                     if ($value && (int) Barangay::find($value)?->city_id !== (int) $request->input('city_id')) {
                         $fail('Selected barangay does not belong to the selected city.');
                     }
                 },
             ],
-            'barangay_name' => ['nullable', 'required_without:barangay_id', 'string', 'max:255'],
+            'barangay_name' => ['prohibited'],
         ], [
             'name.regex' => 'Name may only contain letters.',
             'phone.regex' => 'Phone number must be 11 digits starting with 09 (e.g. 09171234567).',
@@ -81,38 +67,27 @@ class AuthController extends Controller
         // registrations for a DIFFERENT barangay lock a different row and
         // proceed independently.
         [$user, $isFirstForBarangay] = DB::transaction(function () use ($data, $barangayId, $request) {
-            // No barangay picked from a dropdown (the city has no seeded
-            // list yet) — turn the free-typed name into a real Barangay
-            // row, scoped to this city. Resolved INSIDE the transaction
-            // (not before it) so that if registration fails later in this
-            // same closure (e.g. a bad staff code), the row creation rolls
-            // back with everything else instead of leaving an orphaned
-            // Barangay nobody ever actually registered under.
-            $barangayId = $barangayId ?: (!empty($data['barangay_name'])
-                ? Barangay::findOrCreateForCity((int) $data['city_id'], $data['barangay_name'])->id
-                : null);
-
-            Barangay::where('id', $barangayId)->lockForUpdate()->first();
+            $barangay = Barangay::where('id', $barangayId)->lockForUpdate()->firstOrFail();
+            app(\App\Services\BarangayGeography::class)->attachBoundary($barangay);
 
             // Deliberately unscoped (User carries no global scope) and looks
             // across every barangay — this is the one place that's supposed to.
             $isFirstForBarangay = !User::where('barangay_id', $barangayId)->exists();
 
+            // The first-for-this-barangay account has no role choice (it's
+            // always Admin) and no staff code yet: a Super Admin emails it
+            // the code after confirming the appointment, and the account
+            // stays locked until that code is entered (activateWithStaffCode).
             $roleData = $request->validate([
-                // The first-for-this-barangay account has no role choice (it's
-                // always Admin) — but still has to prove they're actually from
-                // this barangay, same as anyone else. Otherwise a stranger
-                // could just claim to be "first" for a real barangay whose
-                // Admin seat is simply still empty and grab it uncontested.
                 'requested_role' => [$isFirstForBarangay ? 'nullable' : 'required', Rule::in(['Custodian', 'Maintenance Personnel'])],
-                'staff_code' => ['required', 'string'],
+                'staff_code' => [$isFirstForBarangay ? 'nullable' : 'required', 'string'],
             ], [
                 'requested_role.required' => 'Please select whether you are a Custodian or Maintenance Personnel.',
                 'staff_code.required' => 'Please enter the staff registration code given to you by your barangay office.',
             ]);
 
             abort_unless(
-                hash_equals(RegistrationSetting::for($barangayId)->staff_code, strtoupper(trim($roleData['staff_code']))),
+                $isFirstForBarangay || hash_equals(RegistrationSetting::for($barangayId)->staff_code, strtoupper(trim($roleData['staff_code']))),
                 422,
                 'That staff registration code is not correct. Ask your barangay office for the current code.'
             );
@@ -136,11 +111,12 @@ class AuthController extends Controller
                 'address' => $data['address'],
                 'city_id' => $data['city_id'],
                 'barangay_id' => $barangayId,
-                'barangay_name' => $data['barangay_name'] ?? null,
+                'barangay_name' => $barangay->name,
                 'role' => $role,
                 'roles' => [$role],
                 'is_active' => false,
                 'approved_at' => null,
+                'awaiting_staff_code' => $isFirstForBarangay,
             ]);
 
             return [$user, $isFirstForBarangay];
@@ -149,10 +125,11 @@ class AuthController extends Controller
         if ($isFirstForBarangay) {
             $barangayLabel = $user->barangay_name ?? $user->barangay?->name ?? 'their barangay';
             $this->notifySuperAdmins(
-                'New barangay Admin awaiting approval',
-                "{$user->name} registered as the first Admin for {$barangayLabel}. Review and approve before they can sign in.",
+                'New barangay Admin awaiting a staff code',
+                "{$user->name} registered as the first Admin for {$barangayLabel}. Confirm the appointment, then email them the staff registration code from Users.",
                 'pending_admin_approval'
             );
+            AccountMail::trySend($user, 'Welcome to VMS. Your account is waiting for approval', 'welcome');
         } else {
             // Every other registration is approved by the barangay's own
             // Admin(s), who otherwise had no way to learn a pending account
@@ -168,7 +145,7 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => $isFirstForBarangay
-                ? 'Registration submitted. A Super Admin must approve your account (as the first Admin for your barangay) before you can sign in.'
+                ? 'Registration submitted. Check your email: a Super Admin will send your staff registration code, which you enter after signing in to activate your account.'
                 : 'Registration submitted. An administrator must approve your account before you can sign in.',
             'user' => [
                 'id' => $user->id,
@@ -212,31 +189,15 @@ class AuthController extends Controller
         }
     }
 
-    /**
-     * Public, side-effect-free preview for the Register form: "if I submit
-     * with this barangay, will I become its first Admin?" Lets the
-     * frontend show that up front instead of only after submitting.
-     * Never creates anything — a free-typed barangay that doesn't exist
-     * yet is trivially "first" without touching the database.
-     */
+    /** Side-effect-free first-Administrator preview for a selected reference ID. */
     public function registrationStatus(Request $request)
     {
         $data = $request->validate([
             'city_id' => ['required', 'exists:cities,id'],
-            'barangay_id' => ['nullable', 'exists:barangays,id'],
-            'barangay_name' => ['nullable', 'string', 'max:255'],
+            'barangay_id' => ['required', Rule::exists('barangays', 'id')->where('city_id', $request->input('city_id'))->whereNotNull('psgc_code')],
+            'barangay_name' => ['prohibited'],
         ]);
-
-        $barangayId = $data['barangay_id'] ?? null;
-
-        if (!$barangayId && !empty($data['barangay_name'])) {
-            $barangayId = Barangay::where('city_id', $data['city_id'])
-                ->whereRaw('LOWER(name) = ?', [strtolower(trim($data['barangay_name']))])
-                ->value('id');
-        }
-
-        $isFirst = !$barangayId || !User::where('barangay_id', $barangayId)->exists();
-
+        $isFirst = !User::where('barangay_id', $data['barangay_id'])->exists();
         return response()->json(['is_first' => $isFirst]);
     }
 
@@ -259,6 +220,17 @@ class AuthController extends Controller
             return response()->json([
                 'message' => 'Invalid credentials provided. Please check your email or password.'
             ], 401); // Returns 401 Unauthorized status code
+        }
+
+        if (!$user->is_active && $user->awaiting_staff_code) {
+            // No token: the code window re-sends these credentials with the code.
+            return response()->json([
+                'message' => $user->staff_code_sent_at
+                    ? 'Enter the staff registration code we emailed you to activate your account.'
+                    : 'Your account is waiting for a staff registration code from the Super Admin. We will email it to you.',
+                'awaiting_staff_code' => true,
+                'staff_code_sent' => $user->staff_code_sent_at !== null,
+            ], 403);
         }
 
         if (!$user->is_active) {
@@ -287,6 +259,57 @@ class AuthController extends Controller
             return response()->json(['message' => $message], 403);
         }
 
+        return $this->signedIn($user);
+    }
+
+    /**
+     * A first Administrator's activation: the same email and password as
+     * sign-in, plus the staff code a Super Admin emailed them. The code
+     * must be this barangay's current one and used within
+     * User::STAFF_CODE_VALID_DAYS of being sent; an expired registration
+     * is cancelled so the person can register again.
+     */
+    public function activateWithStaffCode(Request $request)
+    {
+        $data = $request->validate([
+            'email' => 'required|email',
+            'password' => 'required|string',
+            'staff_code' => 'required|string',
+        ]);
+
+        $user = User::where('email', $data['email'])->first();
+        if (!$user || !Hash::check($data['password'], $user->password)) {
+            return response()->json(['message' => 'Invalid credentials provided. Please check your email or password.'], 401);
+        }
+        abort_unless($user->awaiting_staff_code && !$user->is_active, 422, 'This account is not waiting for a staff registration code.');
+        abort_unless($user->staff_code_sent_at, 422, 'Your staff registration code has not been sent yet. Please wait for the email from the Super Admin.');
+
+        if ($user->staffCodeExpired()) {
+            $user->expireRegistration();
+            return response()->json(['message' => 'Your staff registration code has expired and your registration was cancelled. Please register again.'], 410);
+        }
+
+        abort_unless(
+            hash_equals(RegistrationSetting::for($user->barangay_id)->staff_code, strtoupper(trim($data['staff_code']))),
+            422,
+            'That staff registration code is not correct. Check the code in your email and try again.'
+        );
+
+        $user->update(['is_active' => true, 'approved_at' => $user->approved_at ?? now(), 'awaiting_staff_code' => false]);
+        ActivityLog::create([
+            'user_id' => $user->id,
+            'role' => $user->role,
+            'action' => 'Activate',
+            'module' => 'Authentication',
+            'details' => "{$user->name} activated their account with the emailed staff registration code.",
+        ]);
+        AccountMail::trySend($user, 'Your VMS account is now active', 'activated');
+
+        return $this->signedIn($user);
+    }
+
+    private function signedIn(User $user)
+    {
         // 4. Issue a secure, unique Sanctum token, tagged with every role
         //    (hat) the account may wear so token abilities match its access.
         $token = $user->createToken('auth_token', $user->allRoles())->plainTextToken;
@@ -307,55 +330,22 @@ class AuthController extends Controller
         ], 200);
     }
 
-    /**
-     * DEV-ONLY for an Admin: returns 404 outside local/testing, so an
-     * ordinary barangay Admin's shortcut never exists in a deployed app.
-     * A Super Admin is exempt — production impersonation, for real account
-     * support/recovery, is exactly what that role is for; every use is
-     * still logged (see impersonate() below).
-     */
-    private function assertImpersonationEnabled(Request $request): void
-    {
-        if ($request->user()?->hasRole('Super Admin')) {
-            return;
-        }
-        abort_unless(app()->environment(['local', 'testing']), 404);
-    }
-
-    /**
-     * True for the real Admin/Super Admin who kicked off impersonation, AND
-     * for every account they've since jumped into — the 'impersonated'
-     * ability travels with the token so switching accounts (or back to
-     * yourself) mid-session doesn't require logging out. A genuine
-     * Custodian's normal login token never carries this ability, since it's
-     * only ever added by impersonate() below, which itself requires the
-     * caller to already pass this same check — a real Custodian has no way
-     * to obtain it.
-     */
+    /** Only the dedicated account-switcher login can start a session. */
     private function canImpersonate(Request $request): bool
     {
         return (bool) $request->user()?->canDo('impersonation.start')
-            || (bool) $request->user()?->currentAccessToken()?->can('impersonated');
+            && $request->user()?->currentAccessToken()?->name !== 'impersonation_token';
     }
 
-    /**
-     * List accounts an authenticated user can jump into. For an Admin this
-     * is DEV-ONLY (see assertImpersonationEnabled); for a Super Admin it
-     * works in production too — that's the real account-recovery path.
-     *
-     * Deliberately spans every barangay, not just the caller's own — an
-     * Admin's use of this is dev-only and never exists in production, so
-     * the usual "don't leak other tenants' data" concern doesn't apply to
-     * them; a Super Admin is explicitly meant to see across every barangay.
-     * The frontend groups the result by province/barangay so the caller can
-     * jump to any staff account in any barangay.
-     */
+    /** All accounts across barangays, including platform accounts without a barangay. */
     public function impersonationCandidates(Request $request)
     {
-        $this->assertImpersonationEnabled($request);
-        abort_unless($this->canImpersonate($request), 403, 'Only an Admin or Super Admin can impersonate another account.');
+        abort_unless($this->canImpersonate($request), 403, 'Sign in to the dedicated account switcher to impersonate an account.');
 
         return User::with('barangay.city.province')
+            ->where('id', '!=', $request->user()->id)
+            ->where('role', '!=', 'Impersonator')
+            ->when($request->user()->hasRole('Super Admin'), fn ($q) => $q->where('role', '!=', 'Super Admin'))
             ->orderBy('name')
             ->get(['id', 'name', 'email', 'role', 'roles', 'is_active', 'barangay_id'])
             ->map(fn ($u) => [
@@ -369,37 +359,36 @@ class AuthController extends Controller
                 'province_id' => $u->barangay?->city?->province?->id,
                 'province_name' => $u->barangay?->city?->province?->name,
                 'city_name' => $u->barangay?->city?->name,
+                'city_id' => $u->barangay?->city?->id,
                 'barangay_name' => $u->barangay?->name,
             ]);
     }
 
-    /**
-     * Issue a token for another account so the caller can switch roles
-     * without logging out and back in. For an Admin: DEV-ONLY, guarded by
-     * environment (404 in production), the canImpersonate check, AND, on
-     * the client, by import.meta.env.DEV — all three must hold. For a
-     * Super Admin: works in production too, for real account support —
-     * every use is logged below.
-     */
+    /** Open a stable default barangay Admin without requiring an account picker. */
+    public function impersonateDefault(Request $request)
+    {
+        abort_unless($this->canImpersonate($request), 403, 'Sign in to the dedicated account switcher to impersonate an account.');
+        $target = User::where('role', 'Admin')->where('is_active', true)
+            ->whereNotNull('barangay_id')->whereHas('barangay')
+            ->orderByRaw('CASE WHEN email = ? THEN 0 ELSE 1 END', ['admin@barangay.gov'])
+            ->orderBy('barangay_id')->orderBy('id')->first();
+        abort_unless($target, 422, 'No active barangay Admin is available. Choose another account.');
+        $request->merge(['reason' => 'Automatic login to the default barangay Admin workspace']);
+
+        return $this->impersonate($request, $target);
+    }
+
+    /** Enter a selected account's workspace and keep an audit trail. */
     public function impersonate(Request $request, User $user)
     {
-        $this->assertImpersonationEnabled($request);
-        abort_unless($this->canImpersonate($request), 403, 'Only an Admin or Super Admin can impersonate another account.');
-        // Server-side guard, independent of the frontend candidate list
-        // (which already filters role !== 'Super Admin' out of what it
-        // shows): nobody — not even another Super Admin — may impersonate a
-        // Super Admin account via a direct API call. Checked before the
-        // is_active gate so the rejection reason is unambiguous either way.
-        abort_if($user->hasRole('Super Admin'), 403, 'Super Admin accounts cannot be impersonated.');
-        // Deliberately allowed to cross barangays — see impersonationCandidates
-        // above.
+        abort_unless($this->canImpersonate($request), 403, 'Sign in to the dedicated account switcher to impersonate an account.');
+        abort_if($user->hasRole('Impersonator') || $user->id === $request->user()->id,
+            403, 'The account switcher cannot impersonate itself or another switcher.');
+        abort_if($request->user()->hasRole('Super Admin') && $user->hasRole('Super Admin'),
+            403, 'A Super Admin cannot impersonate another Super Admin.');
         abort_if(!$user->is_active, 422, 'That account is deactivated.');
 
-        // A written reason, on every impersonation (dev-only included, so the
-        // habit — and the log's shape — is the same one that matters in
-        // production): this is a deliberate support/recovery action taken on
-        // someone else's behalf, not idle browsing, and the reason is what
-        // lets whoever reviews the log later actually judge that.
+        // Every account switch records the initiating account and reason.
         $data = $request->validate([
             'reason' => ['required', 'string', 'min:5', 'max:500'],
         ], [
@@ -415,26 +404,27 @@ class AuthController extends Controller
         // In 'local' only, no expiry at all — a dev jumping between many
         // accounts to test a feature shouldn't get logged out mid-session
         // ("Unauthenticated") just for taking longer than 30 minutes.
-        // Production/Super Admin support use is unaffected.
+        // Deployed support sessions retain their 30-minute expiry.
         $impersonationExpiry = app()->environment('local') ? null : now()->addMinutes(30);
-        $token = $user->createToken('impersonation_token', [...$user->allRoles(), 'impersonated'], $impersonationExpiry)->plainTextToken;
+        $issued = $user->createToken('impersonation_token', [...$user->allRoles(), 'impersonated'], $impersonationExpiry);
+        $issued->accessToken->forceFill(['impersonator_user_id' => $request->user()->id, 'impersonation_reason' => $data['reason']])->save();
+        $token = $issued->plainTextToken;
 
-        $actingAsSuperAdmin = $request->user()?->hasRole('Super Admin');
         ActivityLog::create([
             'user_id'     => $request->user()?->id,
             'role'        => $request->user()?->role,
             'action'      => 'Impersonate',
-            'module'      => $actingAsSuperAdmin ? 'Super Admin' : 'Dev Tools',
+            'module'      => 'Impersonation',
             // Explicitly set (not left to BelongsToBarangay's creating-hook
             // default, which would stamp the ACTOR's own barangay_id — null
-            // for a Super Admin) so this entry is visible in the TARGET
+            // for the switcher) so this entry is visible in the TARGET
             // barangay's own Activity Log (FleetController::logs(), scoped
             // by BelongsToBarangay's global scope) as well as here via
             // SuperAdminController::activityLog()'s module filter, from the
             // same single row.
             'barangay_id' => $user->barangay_id,
             'details'     => ($request->user()?->name ?? 'Someone') . " impersonated {$user->name}"
-                . ($actingAsSuperAdmin ? '.' : ' (dev only).')
+                . '.'
                 . " Reason: {$data['reason']}",
         ]);
 
@@ -589,9 +579,11 @@ class AuthController extends Controller
         $data = $request->validate([
             'name' => ['sometimes', 'required', 'string', 'max:255'],
             'email' => ['sometimes', 'required', 'email', Rule::unique('users', 'email')->ignore($user->id)],
-            'phone' => ['nullable', 'string', 'max:30'],
+            'phone' => ['nullable', 'string', 'regex:/^09[0-9]{9}$/'],
             'address' => ['nullable', 'string', 'max:255'],
             'photo' => ['nullable', 'image', 'max:4096'],
+        ], [
+            'phone.regex' => 'Phone number must be 11 digits starting with 09 (e.g. 09171234567).',
         ]);
 
         if ($request->hasFile('photo')) {
@@ -632,6 +624,8 @@ class AuthController extends Controller
         $request->user()->update([
             'password' => Hash::make($data['new_password']),
         ]);
+
+        $request->user()->tokens()->where('id', '!=', $request->user()->currentAccessToken()?->id)->delete();
 
         ActivityLog::create([
             'user_id' => $request->user()->id,

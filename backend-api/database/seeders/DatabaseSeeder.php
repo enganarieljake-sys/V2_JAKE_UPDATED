@@ -11,17 +11,16 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // Call your custom UserSeeder class
+        // Geographic references, followed by the local/testing sample fleet.
         $this->call([
             ProvinceSeeder::class,
             CitySeeder::class,
             CityBoundarySeeder::class,
             BarangaySeeder::class,
+            PhilippineBarangaySeeder::class,
             BarangayBoundarySeeder::class,
-            UserSeeder::class,
             FleetReferenceSeeder::class,
-            MockDataSeeder::class,
-            DemoActivitySeeder::class,
+            SampleFleetSeeder::class,
         ]);
     }
 }

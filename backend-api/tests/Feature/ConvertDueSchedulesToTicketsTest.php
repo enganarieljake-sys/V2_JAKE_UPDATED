@@ -285,7 +285,7 @@ class ConvertDueSchedulesToTicketsTest extends TestCase
         $this->putJson("/api/tickets/{$ticket->ticket_id}/submit-for-verification", [])->assertOk();
 
         Sanctum::actingAs($this->custodian, ['*']);
-        $this->putJson("/api/tickets/{$ticket->ticket_id}/verify", ['test_attested' => true])->assertOk();
+        $this->putJson("/api/tickets/{$ticket->ticket_id}/verify", ['verification_verdict' => 'Approved', 'test_attested' => true])->assertOk();
     }
 
     #[Test]
@@ -335,7 +335,7 @@ class ConvertDueSchedulesToTicketsTest extends TestCase
         $admin = User::factory()->create(['role' => 'Admin', 'roles' => ['Admin']]);
 
         Sanctum::actingAs($admin, ['*']);
-        $this->putJson("/api/tickets/{$ticket->ticket_id}/cancel", [])->assertOk();
+        $this->putJson("/api/tickets/{$ticket->ticket_id}/cancel", ['closing_notes' => 'Work cancelled for this test scenario.'])->assertOk();
         $this->assertSame('Cancelled', $schedule->fresh()->status);
 
         $this->putJson("/api/tickets/{$ticket->ticket_id}/uncancel", [])->assertOk();

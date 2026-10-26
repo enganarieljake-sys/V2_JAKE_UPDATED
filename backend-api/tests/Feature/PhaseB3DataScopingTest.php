@@ -7,6 +7,7 @@ use App\Models\City;
 use App\Models\MaintenanceTicket;
 use App\Models\Province;
 use App\Models\RegistrationSetting;
+use App\Models\TicketArchiveLog;
 use App\Models\TicketSubIssue;
 use App\Models\User;
 use App\Models\Vehicle;
@@ -48,6 +49,29 @@ class PhaseB3DataScopingTest extends TestCase
         $this->custodian = $this->user('Custodian');
         $this->mechanic = $this->user('Maintenance Personnel');
         $this->otherMechanic = $this->user('Maintenance Personnel');
+    }
+
+    #[Test]
+    public function archive_delete_and_restore_cannot_access_another_barangays_records(): void
+    {
+        Sanctum::actingAs($this->admin, ['*']);
+        $ticket = $this->ticket($this->vehicle());
+        $archive = TicketArchiveLog::create([
+            'ticket_id' => $ticket->ticket_id, 'vehicle_id' => $ticket->vehicle_id,
+            'ticket_title' => 'Closed work', 'vehicle_name' => 'Ambulance', 'plate_number' => 'TEST',
+            'final_status' => 'Closed', 'full_ticket_snapshot' => $ticket->toArray(),
+            'archived_by' => $this->admin->id, 'archived_at' => now(),
+        ]);
+        $otherBarangay = Barangay::create(['name' => 'Other Barangay', 'city_id' => $this->cityId]);
+        $otherAdmin = User::factory()->create(['role' => 'Admin', 'roles' => ['Admin'], 'barangay_id' => $otherBarangay->id, 'is_active' => true]);
+        Sanctum::actingAs($otherAdmin, ['*']);
+        $this->deleteJson("/api/ticket-archives/{$archive->archive_id}")->assertNotFound();
+        $this->getJson('/api/ticket-archives')->assertOk()->assertJsonCount(0);
+        Sanctum::actingAs($this->admin, ['*']);
+        $this->deleteJson("/api/ticket-archives/{$archive->archive_id}")->assertOk();
+        Sanctum::actingAs($otherAdmin, ['*']);
+        $this->putJson("/api/ticket-archives/{$archive->archive_id}/restore")->assertNotFound();
+        $this->getJson('/api/ticket-archives')->assertOk()->assertJsonCount(0);
     }
 
     private function user(string $role): User
@@ -335,12 +359,28 @@ class PhaseB3DataScopingTest extends TestCase
 
     // =======================================================================
     // GET /maintenance-records — Maintenance Personnel's "Maintenance
-    // Records"/"Maintenance History" sidebar entries are scoped to records
-    // THEY performed, not the whole barangay-wide ledger.
+    // Records" ledger includes all sources in their barangay; mine remains explicit.
     // =======================================================================
 
     #[Test]
-    public function maintenance_personnel_sees_only_their_own_maintenance_records(): void
+    public function maintenance_record_source_recognizes_direct_and_ticket_converted_schedules(): void
+    {
+        $vehicle=$this->vehicle();
+        $ticket=$this->ticket($vehicle);
+        $sub=$this->subIssue($ticket,$this->mechanic->id);
+        $converted=VehicleMaintenanceRecord::create(['vehicle_id'=>$vehicle->vehicle_id,'ticket_sub_issue_id'=>$sub->sub_issue_id,'maintenance_type'=>'Scheduled pump repair','problem_reason'=>'Scheduled ticket','progress_status'=>'Completed']);
+        $direct=VehicleMaintenanceRecord::create(['vehicle_id'=>$vehicle->vehicle_id,'maintenance_type'=>'Scheduled inspection','problem_reason'=>'Routine inspection','progress_status'=>'Completed','is_external'=>true]);
+        VehicleMaintenanceSchedule::create(['vehicle_id'=>$vehicle->vehicle_id,'maintenance_type'=>'Pump repair','scheduled_date'=>'2026-10-01','created_by'=>$this->admin->id,'resulting_ticket_id'=>$ticket->ticket_id]);
+        VehicleMaintenanceSchedule::create(['vehicle_id'=>$vehicle->vehicle_id,'maintenance_type'=>'Inspection','scheduled_date'=>'2026-10-01','created_by'=>$this->admin->id,'resulting_maintenance_id'=>$direct->maintenance_id]);
+        Sanctum::actingAs($this->mechanic,['*']);
+        $rows=collect($this->getJson('/api/maintenance-records')->assertOk()->json())->keyBy('maintenance_id');
+        $this->assertSame('Scheduled Maintenance',$rows[$converted->maintenance_id]['source']);
+        $this->assertSame('Scheduled Maintenance',$rows[$direct->maintenance_id]['source']);
+        $this->getJson('/api/maintenance-records/'.$converted->maintenance_id)->assertOk()->assertJsonPath('source','Scheduled Maintenance');
+    }
+
+    #[Test]
+    public function maintenance_personnel_sees_barangay_ledger_with_optional_own_record_filter(): void
     {
         $vehicle = $this->vehicle();
         VehicleMaintenanceRecord::create([
@@ -357,9 +397,15 @@ class PhaseB3DataScopingTest extends TestCase
         ]);
 
         Sanctum::actingAs($this->mechanic, ['*']);
+        VehicleMaintenanceRecord::create(['vehicle_id'=>$vehicle->vehicle_id,'maintenance_type'=>'Shop Service','problem_reason'=>'Shop repair','is_external'=>true]);
         $response = $this->getJson('/api/maintenance-records')->assertOk();
-        $this->assertCount(1, $response->json());
-        $this->assertSame('Oil Change', $response->json()[0]['maintenance_type']);
+        $this->assertCount(3, $response->json());
+        $this->getJson('/api/maintenance-records?mine=1')->assertOk()->assertJsonCount(1)->assertJsonPath('0.maintenance_type','Oil Change');
+        $otherBarangay = Barangay::create(['name'=>'Other ledger barangay','city_id'=>$this->cityId]);
+        $otherVehicle = $this->vehicle();
+        $otherVehicle->update(['barangay_id'=>$otherBarangay->id]);
+        VehicleMaintenanceRecord::create(['vehicle_id'=>$otherVehicle->vehicle_id,'maintenance_type'=>'Private other barangay repair','problem_reason'=>'Outside tenant']);
+        $this->getJson('/api/maintenance-records')->assertOk()->assertJsonCount(3);
     }
 
     // =======================================================================
@@ -413,6 +459,7 @@ class PhaseB3DataScopingTest extends TestCase
     #[Test]
     public function an_ordinary_staff_registration_notifies_the_barangays_existing_admins(): void
     {
+        Barangay::findOrFail($this->barangayId)->update(['psgc_code' => '0102801001']);
         $setting = RegistrationSetting::for($this->barangayId);
 
         $this->postJson('/api/register', [

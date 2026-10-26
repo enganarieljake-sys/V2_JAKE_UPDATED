@@ -8,7 +8,9 @@ class Barangay extends Model
 {
     protected $fillable = [
         'name',
+        'psgc_code',
         'city_id',
+        'provisioned_at',
         'boundary',
         'boundary_status',
         'boundary_source',
@@ -20,6 +22,7 @@ class Barangay extends Model
 
     protected $casts = [
         'boundary' => 'array',
+        'provisioned_at' => 'datetime',
         'boundary_verified_at' => 'datetime',
         'pending_boundary' => 'array',
     ];
@@ -37,6 +40,21 @@ class Barangay extends Model
     public function registrationSetting()
     {
         return $this->hasOne(RegistrationSetting::class);
+    }
+
+    /**
+     * Barangays onboarded onto the platform: added by a Super Admin
+     * (provisioned), already staffed, or created by hand. Reference-only
+     * PSGC rows -- and rows that merely hold a seeded registration code --
+     * are registration choices, not platform tenants.
+     */
+    public function scopeRegistered($query)
+    {
+        return $query->where(function ($query) {
+            $query->whereNull($this->qualifyColumn('psgc_code'))
+                ->orWhereNotNull($this->qualifyColumn('provisioned_at'))
+                ->orWhereHas('users');
+        });
     }
 
     /**

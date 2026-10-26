@@ -24,17 +24,10 @@ return [
     'vehicle_type.delete' => ['Admin'],
 
     // Vehicles
-    // Registration is data entry, not a transfer of accountability — a
-    // Custodian may register a vehicle when the barangay delegates that to
-    // them, but vehicle.edit stays Admin-only below, so the protected
-    // master record can't be freely changed afterward by whoever typed it in.
+    // Registration is a standard Admin/Custodian duty; editing remains Admin-only.
     'vehicle.create' => ['Admin', 'Custodian'],
-    // Bulk import registers vehicles, so FleetController::storeVehicle's
-    // per-account delegation check (canRegisterVehicles) still applies on top.
+    // Bulk import follows the same role eligibility as single registration.
     'vehicle.import' => ['Admin', 'Custodian'],
-    // Vehicle Usage Log: who took which vehicle where, and when it came back.
-    'usage.view' => ['Admin', 'Custodian'],
-    'usage.log' => ['Admin', 'Custodian'],
     'vehicle.edit' => ['Admin'],
     'vehicle.archive' => ['Admin'],
     'vehicle.restore' => ['Admin'],
@@ -150,6 +143,7 @@ return [
     // Tickets
     'ticket.view_open_for_vehicle' => ['Admin'],
     'ticket.view_archives' => ['Admin'],
+    'ticket.manage_list_visibility' => ['Admin', 'Custodian', 'Maintenance Personnel'],
     'ticket.check_recurrence' => ['Admin', 'Custodian'],
     // Nobody holds this any more — every ticket must originate as a
     // Custodian's proposal (ticket.propose) that Admin then reviews, edits,
@@ -161,6 +155,8 @@ return [
     'ticket.propose' => ['Custodian'],
     'ticket.approve' => ['Admin'],
     'ticket.decline' => ['Admin'],
+    'ticket.request_corrections' => ['Admin'],
+    'ticket.resubmit' => ['Custodian'],
     'ticket.inspect' => [],
     'ticket.reassign_custodian' => ['Admin'],
     'ticket.close' => [],
@@ -173,8 +169,8 @@ return [
     'ticket.verify' => ['Custodian'],
 
     // Sub-issues
-    // Add / rename / remove a not-yet-dispatched sub-issue (Custodian: own ticket only).
-    'subissue.manage' => ['Admin', 'Custodian'],
+    // Only Admin may change an active ticket's sub-issues; Custodians propose and verify.
+    'subissue.manage' => ['Admin'],
     'subissue.assign_mechanic' => [],
     'subissue.reassign_mechanic' => [],
     'subissue.log_repair' => ['Maintenance Personnel'],
@@ -198,11 +194,9 @@ return [
     'repair.approve_cannibalized' => ['Admin'],
     'repair.reject_cannibalized' => ['Admin'],
 
-    // Catalogs (fault categories, maintenance types — same two rules today,
-    // deliberately collapsed from 6 checks into 3 abilities). Phase B4:
-    // create narrowed to Admin only — everyone else picks "Other" + a note
-    // instead of minting a new global catalog value.
-    'catalog.create' => ['Admin'],
+    // Shared dropdown catalogs.
+    // Operational users manage the shared issue and repair catalogs inline.
+    'catalog.create' => ['Admin', 'Custodian', 'Maintenance Personnel'],
     'catalog.edit' => ['Admin'],
     'catalog.delete' => ['Admin'],
 
@@ -216,7 +210,7 @@ return [
     'registration_code.regenerate' => ['Admin'],
 
     // Impersonation
-    'impersonation.start' => ['Admin', 'Super Admin'],
+    'impersonation.start' => ['Impersonator'],
 
     // Super Admin platform administration
     'barangay.view_all' => ['Super Admin'],
@@ -230,9 +224,11 @@ return [
     'user.reject' => ['Super Admin'],
     'user.view_pending' => ['Super Admin'],
     'user.change_role_platform' => ['Super Admin'],
+    'user.email_platform' => ['Super Admin'],
     'activity_log.view_platform' => ['Super Admin'],
     'concern_report.view' => ['Super Admin'],
     'concern_report.resolve' => ['Super Admin'],
     'concern_report.reopen' => ['Super Admin'],
     'concern_report.delete' => ['Super Admin'],
+    'concern_report.email' => ['Super Admin'],
 ];

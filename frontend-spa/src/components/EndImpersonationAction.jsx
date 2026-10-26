@@ -1,12 +1,15 @@
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import api from '../api/axios';
 import Icon from './Icon';
+import { AuthContext } from '../context/AuthContextObject';
 
-export default function EndImpersonationAction() {
+export default function EndImpersonationAction({ compact = false }) {
+  const { user } = useContext(AuthContext);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const originalToken = localStorage.getItem('impersonator_token');
-  if (!originalToken) return null;
+  const isSwitcher = localStorage.getItem('impersonator_role') === 'Impersonator';
+  if (!user?.is_impersonating || !originalToken || isSwitcher) return null;
   const end = async () => {
     if (busy) return;
     setBusy(true);
@@ -27,8 +30,8 @@ export default function EndImpersonationAction() {
     }
   };
   return <>
-    <button type="button" className="profile-menu-item" disabled={busy} onClick={end}>
-      <Icon name="arrowLeft" size={15} />{busy ? 'Ending session…' : 'End Impersonation'}
+    <button type="button" className={compact ? 'ghost-button' : 'profile-menu-item'} disabled={busy} onClick={end}>
+      <Icon name="arrowLeft" size={15} />{busy ? 'Ending session...' : 'End Impersonation'}
     </button>
     {error && <p className="profile-menu-impersonation-error" role="alert">{error}</p>}
   </>;
