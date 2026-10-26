@@ -1,6 +1,13 @@
+import paknaanAuthoritativeBoundary from './paknaan-boundary.psa.json';
+
 // Source: VOOMS SYSTEM/vomms_fixed/src/lib/paknaanBoundary.ts
 // Coordinates are Leaflet LatLng tuples: [latitude, longitude].
 export const PAKNAAN_CENTER = { lat: 10.3462, lng: 123.9603 };
+
+// The Vehicle Location map uses this verified PSA geometry rather than the
+// legacy hand-maintained coordinate list below. GeoJSON stays in its standard
+// [longitude, latitude] order; geoJsonToRings converts it for Leaflet.
+export const PAKNAAN_AUTHORITATIVE_GEOMETRY = paknaanAuthoritativeBoundary.geometry;
 
 export const PAKNAAN_BOUNDS = [
   [10.3398, 123.9469],
